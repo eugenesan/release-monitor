@@ -1,0 +1,19 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Release Monitor authors"
+            }
+        ],
+        "Category": "Utilities",
+        "Description": "Monitors GitHub, F-Droid, Debian and plain HTTP directory listings for new releases, notifies you and downloads artifacts",
+        "EnabledByDefault": true,
+        "Icon": "system-software-update",
+        "Id": "com.github.releasemonitor",
+        "License": "GPL-3.0+",
+        "Name": "Release Monitor",
+        "Version": "0.1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
