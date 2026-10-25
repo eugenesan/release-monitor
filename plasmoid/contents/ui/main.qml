@@ -69,8 +69,14 @@ PlasmoidItem {
     }
 
     function fmtTime(ms) {
-        if (!ms) return "—";
+        if (!ms) return i18n("n/a");
         return Qt.formatDateTime(new Date(ms), "yyyy-MM-dd HH:mm");
+    }
+
+    // Release time as reported by the source; 0 when it cannot be detected
+    // (older saved states stored a "first seen" guess flagged with timeIsSeen: ignore it)
+    function releaseTime(st) {
+        return (st && st.time && !st.timeIsSeen) ? st.time : 0;
     }
 
     function fmtSize(b) {
@@ -133,7 +139,7 @@ PlasmoidItem {
         rowsOut.push([i18n("Name"), i18n("Last release"), i18n("Release time"), i18n("Last check")]);
         list.forEach(function (r) {
             var st = r.st || {};
-            var rel = fmtTime(st.time) + (st.time && st.timeIsSeen ? " *" : "");
+            var rel = fmtTime(releaseTime(st));
             rowsOut.push([
                 r.name,
                 st.version || "—",
@@ -161,17 +167,10 @@ PlasmoidItem {
             id: tip
             spacing: Kirigami.Units.smallSpacing
             readonly property var cells: root.tooltipCells(root.tipRows)
-            readonly property bool anySeen: root.tipRows.some(function (r) { return r.st && r.st.time && r.st.timeIsSeen; })
 
             PlasmaExtras.Heading {
                 level: 4
-                text: i18n("Release Monitor")
-            }
-
-            PlasmaComponents3.Label {
-                text: i18n("Only new and just added URLs are listed here")
-                font.italic: true
-                opacity: 0.7
+                text: i18n("New releases")
             }
 
             PlasmaComponents3.Label {
@@ -246,13 +245,6 @@ PlasmoidItem {
                         }
                     }
                 }
-            }
-
-            PlasmaComponents3.Label {
-                visible: tip.anySeen
-                text: "* " + i18n("time when this widget first saw the release")
-                font.italic: true
-                opacity: 0.7
             }
 
             PlasmaComponents3.Label {
@@ -352,8 +344,8 @@ PlasmoidItem {
                     var oldVersion = st.version;
                     st.id = res.id;
                     st.version = res.version;
-                    st.time = res.time || Date.now();
-                    st.timeIsSeen = !res.time;
+                    st.time = res.time || 0;           // 0 = not detectable, shown as n/a
+                    st.timeIsSeen = false;
                     st.link = res.link;
                     st.typeLabel = res.typeLabel || "";
                     st.artifacts = res.artifacts;
@@ -364,6 +356,7 @@ PlasmoidItem {
                 } else {
                     // same release: refresh artifact list (e.g. late-uploaded assets)
                     st.artifacts = res.artifacts;
+                    if (res.time) { st.time = res.time; st.timeIsSeen = false; }
                     st.typeLabel = res.typeLabel || "";
                 }
             }
@@ -754,14 +747,16 @@ PlasmoidItem {
                         }
                         // "new" marker: always present, greyed out when inactive
                         Kirigami.Icon {
-                            source: "software-update-available"
-                            fallback: "emblem-important"
+                            source: "notifications"
+                            fallback: "preferences-desktop-notification"
                             Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
                             Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
                             opacity: del.isNew ? 1.0 : 0.25
                             HoverHandler { id: newHover }
-                            QQC2.ToolTip.visible: newHover.hovered && del.isNew
-                            QQC2.ToolTip.text: del.st.fresh === true ? i18n("New release") : i18n("Just added")
+                            QQC2.ToolTip.visible: newHover.hovered
+                            QQC2.ToolTip.text: del.st.fresh === true ? i18n("New release")
+                                             : del.st.added === true ? i18n("Just added")
+                                             : i18n("No new release")
                         }
                         IconButton {
                             icon.name: "dialog-ok-apply"
@@ -793,11 +788,8 @@ PlasmoidItem {
                         spacing: Kirigami.Units.largeSpacing
 
                         PlasmaComponents3.Label {
-                            text: i18n("Released: %1", root.fmtTime(del.st.time) + (del.st.time && del.st.timeIsSeen ? " *" : ""))
+                            text: i18n("Released: %1", root.fmtTime(root.releaseTime(del.st)))
                             opacity: 0.8
-                            HoverHandler { id: relHover }
-                            QQC2.ToolTip.visible: relHover.hovered && del.st.timeIsSeen === true
-                            QQC2.ToolTip.text: i18n("The source does not provide a release time; this is when the widget first saw the release.")
                         }
                         PlasmaComponents3.Label {
                             text: i18n("Last check: %1", del.st.lastCheck ? root.fmtTime(del.st.lastCheck) : i18n("never"))
