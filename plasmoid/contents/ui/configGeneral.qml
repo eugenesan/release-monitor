@@ -131,7 +131,7 @@ KCM.SimpleKCM {
         Kirigami.InlineMessage {
             Layout.fillWidth: true
             visible: true
-            text: i18n("Supported: github.com/OWNER/REPO/releases, f-droid.org/packages/APP.ID, packages.debian.org/SUITE/PACKAGE, or any web directory listing. The optional filter is a case-insensitive regular expression applied to artifact / file names, e.g. linux.*x64.*\\.tar\\.xz$")
+            text: i18n("Supported: github.com/OWNER/REPO/releases, f-droid.org/packages/APP.ID, packages.debian.org/SUITE/PACKAGE, or any web directory listing (a listing containing .dsc files is treated as a Debian package and shows only .dsc/.deb files). The optional filter is a case-insensitive regular expression; only artifacts / files whose name matches are kept. Example for 7-Zip: linux-x64|lzma|src")
         }
 
         Repeater {
@@ -161,7 +161,7 @@ KCM.SimpleKCM {
                 }
                 QQC2.TextField {
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 9
-                    placeholderText: i18n("Filter (regex)")
+                    placeholderText: i18n("Filter, e.g. linux-x64|lzma|src")
                     text: entry.itemFilter
                     onTextEdited: { lm.setProperty(entry.index, "itemFilter", text); page.syncList(); }
                 }

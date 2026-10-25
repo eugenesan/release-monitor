@@ -6,7 +6,7 @@
     <group name="General">
         <!-- JSON array: [{"name": "...", "url": "...", "filter": "regex"}] -->
         <entry name="urlsJson" type="String">
-            <default>[{&quot;name&quot;:&quot;7-Zip&quot;,&quot;url&quot;:&quot;https://github.com/ip7z/7zip/releases&quot;,&quot;filter&quot;:&quot;&quot;},{&quot;name&quot;:&quot;F-Droid&quot;,&quot;url&quot;:&quot;https://f-droid.org/en/packages/org.fdroid.fdroid/&quot;,&quot;filter&quot;:&quot;&quot;},{&quot;name&quot;:&quot;MEGA (Ubuntu 26.04)&quot;,&quot;url&quot;:&quot;https://mega.nz/linux/repo/xUbuntu_26.04/&quot;,&quot;filter&quot;:&quot;&quot;}]</default>
+            <default>[{&quot;name&quot;:&quot;7-Zip&quot;,&quot;url&quot;:&quot;https://github.com/ip7z/7zip/releases&quot;,&quot;filter&quot;:&quot;linux-x64|lzma|src&quot;},{&quot;name&quot;:&quot;F-Droid&quot;,&quot;url&quot;:&quot;https://f-droid.org/en/packages/org.fdroid.fdroid/&quot;,&quot;filter&quot;:&quot;&quot;},{&quot;name&quot;:&quot;MEGA (Ubuntu 26.04)&quot;,&quot;url&quot;:&quot;https://mega.nz/linux/repo/xUbuntu_26.04/&quot;,&quot;filter&quot;:&quot;&quot;}]</default>
         </entry>
         <entry name="intervalMinutes" type="Int">
             <default>60</default>

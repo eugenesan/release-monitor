@@ -34,13 +34,20 @@ PlasmoidItem {
                                            .toString().replace(/^file:\/\//, "")
 
     // ------------------------------------------------------------ plasmoid properties
-    Plasmoid.icon: "system-software-update"
+    Plasmoid.icon: freshCount > 0 ? "update-high" : "update-none"
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     Plasmoid.busy: checkingCount > 0
 
+    // A custom tooltip item (instead of rich-text sub text) gives a real bordered table and
+    // does not leave a rich-text format behind in the shared tooltip of other plasmoids.
     toolTipMainText: i18n("Release Monitor")
-    toolTipSubText: tooltipHtml(rows)
-    toolTipTextFormat: Text.RichText
+    toolTipItem: Loader {
+        sourceComponent: tooltipComponent
+        Layout.minimumWidth: item ? item.implicitWidth : 0
+        Layout.minimumHeight: item ? item.implicitHeight : 0
+        Layout.maximumWidth: Layout.minimumWidth
+        Layout.maximumHeight: Layout.minimumHeight
+    }
 
     // "Configure…" is added automatically by Plasma
     Plasmoid.contextualActions: [
@@ -95,33 +102,87 @@ PlasmoidItem {
         return null;
     }
 
-    function tooltipHtml(list) {
-        if (!list || list.length === 0)
-            return i18n("No URLs configured. Right-click the icon and choose “Configure…”.");
-
-        var anySeen = false;
-        var h = "<table cellspacing='0' cellpadding='3'>";
-        h += "<tr><th align='left'>" + i18n("Name") + "</th>"
-           + "<th align='left'>" + i18n("Last release") + "</th>"
-           + "<th align='left'>" + i18n("Release time") + "</th>"
-           + "<th align='left'>" + i18n("Last check") + "</th></tr>";
+    // Flat list of table cells for the tooltip: [{text, header, span, error}]
+    function tooltipCells(list) {
+        var cells = [];
+        [i18n("Name"), i18n("Last release"), i18n("Release time"), i18n("Last check")].forEach(function (t) {
+            cells.push({ text: t, header: true, span: 1, error: false });
+        });
         list.forEach(function (r) {
             var st = r.st || {};
-            var rel = fmtTime(st.time);
-            if (st.time && st.timeIsSeen) { rel += " *"; anySeen = true; }
-            h += "<tr>"
-               + "<td>" + esc(r.name) + (st.fresh ? " <b>(" + i18n("new") + ")</b>" : "") + "</td>"
-               + "<td>" + (st.version ? esc(st.version) : "—") + "</td>"
-               + "<td>" + rel + "</td>"
-               + "<td>" + (st.lastCheck ? fmtTime(st.lastCheck) : i18n("never")) + "</td>"
-               + "</tr>";
+            var rel = fmtTime(st.time) + (st.time && st.timeIsSeen ? " *" : "");
+            cells.push({ text: r.name + (st.fresh ? " (" + i18n("new") + ")" : ""), header: false, span: 1, error: false });
+            cells.push({ text: st.version || "—", header: false, span: 1, error: false });
+            cells.push({ text: rel, header: false, span: 1, error: false });
+            cells.push({ text: st.lastCheck ? fmtTime(st.lastCheck) : i18n("never"), header: false, span: 1, error: false });
             if (st.error)
-                h += "<tr><td colspan='4'><font color='#da4453'>⚠ " + esc(st.error) + "</font></td></tr>";
+                cells.push({ text: "⚠ " + st.error, header: false, span: 4, error: true });
         });
-        h += "</table>";
-        if (anySeen)
-            h += "<br/><i>* " + i18n("time when this widget first saw the release") + "</i>";
-        return h;
+        return cells;
+    }
+
+    Component {
+        id: tooltipComponent
+        ColumnLayout {
+            id: tip
+            spacing: Kirigami.Units.smallSpacing
+            readonly property var cells: root.tooltipCells(root.rows)
+            readonly property bool anySeen: root.rows.some(function (r) { return r.st && r.st.time && r.st.timeIsSeen; })
+
+            PlasmaExtras.Heading {
+                level: 4
+                text: i18n("Release Monitor")
+            }
+
+            PlasmaComponents3.Label {
+                visible: root.rows.length === 0
+                text: i18n("No URLs configured. Right-click the icon and choose “Configure…”.")
+            }
+
+            GridLayout {
+                visible: root.rows.length > 0
+                columns: 4
+                columnSpacing: -1   // overlap borders so lines are 1px wide
+                rowSpacing: -1
+
+                Repeater {
+                    model: tip.cells
+                    delegate: Rectangle {
+                        id: cell
+                        required property var modelData
+                        Layout.columnSpan: modelData.span
+                        Layout.fillWidth: modelData.span > 1
+                        Layout.fillHeight: true
+                        implicitWidth: modelData.span > 1 ? 1 : cellLabel.implicitWidth + Kirigami.Units.largeSpacing * 2
+                        implicitHeight: cellLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
+                        color: modelData.header ? Qt.alpha(Kirigami.Theme.textColor, 0.12) : "transparent"
+                        border.width: 1
+                        border.color: Qt.alpha(Kirigami.Theme.textColor, 0.35)
+
+                        PlasmaComponents3.Label {
+                            id: cellLabel
+                            anchors.left: parent.left
+                            anchors.right: modelData.span > 1 ? parent.right : undefined
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: Kirigami.Units.largeSpacing
+                            anchors.rightMargin: Kirigami.Units.largeSpacing
+                            text: cell.modelData.text
+                            textFormat: Text.PlainText
+                            elide: cell.modelData.span > 1 ? Text.ElideRight : Text.ElideNone
+                            font.bold: cell.modelData.header
+                            color: cell.modelData.error ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                        }
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                visible: tip.anySeen
+                text: "* " + i18n("time when this widget first saw the release")
+                font.italic: true
+                opacity: 0.7
+            }
+        }
     }
 
     // ------------------------------------------------------------ state management
@@ -195,6 +256,7 @@ PlasmoidItem {
                     st.time = res.time || Date.now();
                     st.timeIsSeen = !res.time;
                     st.link = res.link;
+                    st.typeLabel = res.typeLabel || "";
                     st.artifacts = res.artifacts;
                     if (hadPrevious) {
                         st.fresh = true;
@@ -203,6 +265,7 @@ PlasmoidItem {
                 } else {
                     // same release: refresh artifact list (e.g. late-uploaded assets)
                     st.artifacts = res.artifacts;
+                    st.typeLabel = res.typeLabel || "";
                 }
             }
             states[item.url] = st;
@@ -312,12 +375,27 @@ PlasmoidItem {
         var key = item.url + "|" + art.name;
         setDl(key, "busy");
         var dir = targetDir(item);
-        var file = dir + "/" + safeName(art.name);
-        var part = file + ".part";
-        var cmd = "mkdir -p " + shq(dir)
+        var cmd;
+        if (art.kind === "dsc") {
+            // Equivalent of `dget URL.dsc`: fetches the .dsc and every file it lists.
+            // -u skips signature verification (so a missing keyring does not fail the download).
+            // Falls back to curl + the "Files:" section when devscripts/dget is not installed.
+            var slash = art.url.lastIndexOf("/");
+            var baseUrl = art.url.substring(0, slash + 1);
+            var fn = art.url.substring(slash + 1);
+            cmd = "mkdir -p " + shq(dir) + " && cd " + shq(dir)
+                + " && if command -v dget >/dev/null 2>&1; then dget -u " + shq(art.url) + "; else"
+                + " curl -fL --retry 3 -O " + shq(art.url)
+                + " && awk '/^Files:/{f=1;next} /^[^ ]/{f=0} f&&NF==3{print $3}' " + shq(fn)
+                + " | while read -r f; do curl -fL --retry 3 -O " + shq(baseUrl) + "\"$f\" || exit 1; done; fi";
+        } else {
+            var file = dir + "/" + safeName(art.name);
+            var part = file + ".part";
+            cmd = "mkdir -p " + shq(dir)
                 + " && curl -fL --retry 3 --connect-timeout 20 -o " + shq(part) + " " + shq(art.url)
                 + " && mv -f " + shq(part) + " " + shq(file)
                 + " || { rm -f " + shq(part) + "; exit 1; }";
+        }
         executor.run(cmd, function (code, err) {
             var ok = (code === 0);
             setDl(key, ok ? "done" : "failed");
@@ -334,15 +412,14 @@ PlasmoidItem {
         });
     }
 
-    function downloadAll(url) {
-        var item = findItem(url), st = states[url];
-        if (!item || !st || !st.artifacts || st.artifacts.length === 0) {
+    function downloadList(item, arts) {
+        if (!item || !arts || arts.length === 0) {
             notifyDone(i18n("Nothing to download"),
                        item ? i18n("%1 has no downloadable artifacts (check the filter).", item.name) : "", "");
             return;
         }
-        var total = st.artifacts.length, finished = 0, okCount = 0, dirOut = "";
-        st.artifacts.forEach(function (a) {
+        var total = arts.length, finished = 0, okCount = 0, dirOut = "";
+        arts.forEach(function (a) {
             downloadArtifact(item, a, function (ok, dir) {
                 finished++;
                 if (ok) { okCount++; dirOut = dir; }
@@ -353,6 +430,31 @@ PlasmoidItem {
                 }
             });
         });
+    }
+
+    function downloadAll(url) {
+        var st = states[url];
+        downloadList(findItem(url), st ? st.artifacts : []);
+    }
+
+    function downloadGroup(url, group) {
+        var st = states[url];
+        downloadList(findItem(url), (st && st.artifacts ? st.artifacts : []).filter(function (a) { return a.group === group; }));
+    }
+
+    // aggregate download status of several artifacts: "" | "busy" | "done" | "failed"
+    function groupStatus(url, arts) {
+        var busyN = 0, doneN = 0, failedN = 0;
+        arts.forEach(function (a) {
+            var v = dlStatus[url + "|" + a.name];
+            if (v === "busy") busyN++;
+            else if (v === "done") doneN++;
+            else if (v === "failed") failedN++;
+        });
+        if (busyN) return "busy";
+        if (failedN) return "failed";
+        if (doneN === arts.length && doneN > 0) return "done";
+        return "";
     }
 
     // ------------------------------------------------------------ scheduling
@@ -405,7 +507,8 @@ PlasmoidItem {
 
         Kirigami.Icon {
             anchors.fill: parent
-            source: "system-software-update"
+            source: root.freshCount > 0 ? "update-high" : "update-none"
+            fallback: root.freshCount > 0 ? "software-update-available" : "system-software-update"
             active: compactRoot.containsMouse
         }
 
@@ -477,22 +580,28 @@ PlasmoidItem {
                     id: del
                     required property var modelData
                     readonly property var st: modelData.st || ({})
-                    readonly property int artCount: (st.artifacts || []).length
+                    readonly property var arts: st.artifacts || []
+                    readonly property var plainArts: arts.filter(function (a) { return !a.group; })
+                    readonly property var buildArts: arts.filter(function (a) { return a.group === "build"; })
 
                     width: ListView.view.width - Kirigami.Units.largeSpacing
                     spacing: Kirigami.Units.smallSpacing
 
+                    // line 1: name, last release, buttons
                     RowLayout {
                         Layout.fillWidth: true
                         PlasmaExtras.Heading {
                             level: 4
                             text: del.modelData.name
                             elide: Text.ElideRight
-                            Layout.fillWidth: true
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 10
                         }
                         PlasmaComponents3.Label {
-                            text: Checkers.typeLabel(del.modelData.type)
-                            opacity: 0.6
+                            text: del.st.version || "—"
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            color: Kirigami.Theme.highlightColor
+                            font.bold: true
                         }
                         PlasmaComponents3.Label {
                             visible: del.st.fresh === true
@@ -514,7 +623,7 @@ PlasmoidItem {
                         IconButton {
                             icon.name: "download"
                             text: i18n("Download all artifacts")
-                            enabled: del.artCount > 0
+                            enabled: del.arts.length > 0
                             onClicked: root.downloadAll(del.modelData.url)
                         }
                         IconButton {
@@ -524,27 +633,26 @@ PlasmoidItem {
                         }
                     }
 
-                    GridLayout {
-                        columns: 2
-                        columnSpacing: Kirigami.Units.largeSpacing
-                        rowSpacing: 0
+                    // line 2: release time + last check + source type
+                    RowLayout {
                         Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
 
-                        PlasmaComponents3.Label { text: i18n("Last release:"); opacity: 0.7 }
                         PlasmaComponents3.Label {
-                            text: del.st.version || "—"
-                            wrapMode: Text.Wrap
-                            Layout.fillWidth: true
+                            text: i18n("Released: %1", root.fmtTime(del.st.time) + (del.st.time && del.st.timeIsSeen ? " *" : ""))
+                            opacity: 0.8
+                            HoverHandler { id: relHover }
+                            QQC2.ToolTip.visible: relHover.hovered && del.st.timeIsSeen === true
+                            QQC2.ToolTip.text: i18n("The source does not provide a release time; this is when the widget first saw the release.")
                         }
-                        PlasmaComponents3.Label { text: i18n("Release time:"); opacity: 0.7 }
                         PlasmaComponents3.Label {
-                            text: root.fmtTime(del.st.time) + (del.st.time && del.st.timeIsSeen ? " " + i18n("(first seen)") : "")
-                            Layout.fillWidth: true
+                            text: i18n("Last check: %1", del.st.lastCheck ? root.fmtTime(del.st.lastCheck) : i18n("never"))
+                            opacity: 0.8
                         }
-                        PlasmaComponents3.Label { text: i18n("Last check:"); opacity: 0.7 }
+                        Item { Layout.fillWidth: true }
                         PlasmaComponents3.Label {
-                            text: del.st.lastCheck ? root.fmtTime(del.st.lastCheck) : i18n("never")
-                            Layout.fillWidth: true
+                            text: del.st.typeLabel || Checkers.typeLabel(del.modelData.type)
+                            opacity: 0.6
                         }
                     }
 
@@ -557,7 +665,7 @@ PlasmoidItem {
                     }
 
                     Repeater {
-                        model: del.st.artifacts || []
+                        model: del.plainArts
                         delegate: RowLayout {
                             id: artRow
                             required property var modelData
@@ -585,10 +693,42 @@ PlasmoidItem {
                             }
                             IconButton {
                                 icon.name: "download"
-                                text: i18n("Download")
+                                text: artRow.modelData.kind === "dsc" ? i18n("Download (dget: .dsc and its files)") : i18n("Download")
                                 enabled: artRow.dl !== "busy"
                                 onClicked: root.downloadOne(del.modelData.url, artRow.modelData)
                             }
+                        }
+                    }
+
+                    // F-Droid: source tarball, build log and signature as one download
+                    RowLayout {
+                        id: buildRow
+                        visible: del.buildArts.length > 0
+                        readonly property string gs: root.groupStatus(del.modelData.url, del.buildArts)
+                        Layout.fillWidth: true
+                        Layout.leftMargin: Kirigami.Units.largeSpacing
+
+                        PlasmaComponents3.Label {
+                            text: i18np("Build artifacts (%1 file)", "Build artifacts (%1 files)", del.buildArts.length)
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            HoverHandler { id: buildHover }
+                            QQC2.ToolTip.visible: buildHover.hovered
+                            QQC2.ToolTip.text: del.buildArts.map(function (a) { return a.name; }).join("\n")
+                        }
+                        PlasmaComponents3.Label {
+                            visible: buildRow.gs !== ""
+                            text: buildRow.gs === "busy" ? i18n("Downloading…")
+                                : buildRow.gs === "done" ? "✓" : i18n("Failed")
+                            color: buildRow.gs === "failed" ? Kirigami.Theme.negativeTextColor
+                                 : buildRow.gs === "done" ? Kirigami.Theme.positiveTextColor
+                                 : Kirigami.Theme.textColor
+                        }
+                        IconButton {
+                            icon.name: "download"
+                            text: i18n("Download build artifacts (source, build log, signature)")
+                            enabled: buildRow.gs !== "busy"
+                            onClicked: root.downloadGroup(del.modelData.url, "build")
                         }
                     }
 

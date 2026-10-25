@@ -122,24 +122,54 @@ function checkFdroid(item, opts, re, cb) {
         var list = j.packages || [];
         if (!list.length) { cb("No versions found"); return; }
         var cur = list.filter(function (p) { return p.versionCode === j.suggestedVersionCode; })[0] || list[0];
-        var fname = pkg + "_" + cur.versionCode + ".apk";
+        var vc = String(cur.versionCode);
+        var base = "https://f-droid.org/repo/" + pkg + "_" + vc;
+        var apk = { name: pkg + "_" + vc + ".apk", url: base + ".apk" };
         var result = {
-            id: String(cur.versionCode),
-            version: cur.versionName + " (" + cur.versionCode + ")",
+            id: vc,
+            version: cur.versionName + " (" + vc + ")",
             time: null,
             link: item.url,
-            artifacts: filterArtifacts([{ name: fname, url: "https://f-droid.org/repo/" + fname }], re)
+            artifacts: []
         };
-        // Best effort: the "Added on <date>" text on the package page
+
+        function finish(buildArts) {
+            var all = [apk].concat(buildArts);
+            result.artifacts = filterArtifacts(all, re);
+            cb(null, result);
+        }
+
+        // The package page lists the files that belong to a version
+        // (apk, signature, source tarball, build log...). Parse them from the page,
+        // and fall back to the well-known file names if nothing is found.
         request("GET", item.url, {}, function (err2, html) {
+            var found = [], seen = {};
+            seen[apk.name] = true;
             if (!err2 && html) {
-                var dm = new RegExp(cur.versionCode + "[\\s\\S]{0,1500}?Added on\\s*([^<\\n]+)").exec(html);
+                var dm = new RegExp(vc + "[\\s\\S]{0,1500}?Added on\\s*([^<\\n]+)").exec(html);
                 if (dm) {
                     var t = Date.parse(dm[1].trim());
                     if (!isNaN(t)) result.time = t;
                 }
+                var hre = /href="([^"#][^"]*)"/g, hm;
+                while ((hm = hre.exec(html)) !== null) {
+                    var href = hm[1].replace(/&amp;/g, "&");
+                    if (href.indexOf(vc) < 0) continue;
+                    if (href.charAt(0) === "/") href = "https://f-droid.org" + href;
+                    if (!/^https?:\/\/[^\/]*f-droid\.org\//i.test(href)) continue;
+                    var fname = decodeURIComponent(href.substring(href.lastIndexOf("/") + 1).replace(/[?#].*$/, ""));
+                    if (!fname || seen[fname]) continue;
+                    seen[fname] = true;
+                    found.push({ name: fname, url: href, group: "build" });
+                }
             }
-            cb(null, result);
+            if (!found.length) {
+                found = [
+                    { name: apk.name + ".asc", url: apk.url + ".asc", group: "build" },
+                    { name: pkg + "_" + vc + "_src.tar.gz", url: base + "_src.tar.gz", group: "build" }
+                ];
+            }
+            finish(found);
         });
     });
 }
@@ -259,27 +289,50 @@ function parseListing(html, base) {
     return out;
 }
 
+function sortNewestFirst(entries) {
+    entries.sort(function (a, b) {
+        if (a.time && b.time && a.time !== b.time) return b.time - a.time;
+        if (!!a.time !== !!b.time) return a.time ? -1 : 1;
+        return natCmp(b.name, a.name);
+    });
+    return entries;
+}
+
 function checkDirectory(item, opts, re, cb) {
     var base = item.url.replace(/[?#].*$/, "");
     if (base.charAt(base.length - 1) !== "/") base += "/";
     request("GET", base, {}, function (err, html) {
         if (err) { cb(err); return; }
-        var entries = parseListing(html, base).filter(function (e) { return !re || re.test(e.name); });
+        var all = parseListing(html, base);
+        // A listing with at least one .dsc file is a Debian source/binary package directory
+        var isDeb = all.some(function (e) { return !e.isDir && /\.dsc$/i.test(e.name); });
+        var entries = all.filter(function (e) { return !re || re.test(e.name); });
+        if (isDeb) entries = entries.filter(function (e) { return !e.isDir && /\.(dsc|deb)$/i.test(e.name); });
         if (!entries.length) { cb("No matching entries found in the listing"); return; }
-        entries.sort(function (a, b) {
-            if (a.time && b.time && a.time !== b.time) return b.time - a.time;
-            if (!!a.time !== !!b.time) return a.time ? -1 : 1;
-            return natCmp(b.name, a.name);
-        });
-        var latest = entries[0];
-        var arts = entries.filter(function (e) { return !e.isDir; }).slice(0, 30).map(function (e) {
-            return { name: e.name, url: /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href, size: e.size };
+        sortNewestFirst(entries);
+
+        function urlOf(e) { return /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href; }
+
+        var latest = entries[0], version = null;
+        if (isDeb) {
+            var dscs = entries.filter(function (e) { return /\.dsc$/i.test(e.name); });
+            if (dscs.length) {
+                latest = dscs[0];
+                var vm = /^(.+?)_(.+)\.dsc$/i.exec(latest.name);
+                version = vm ? vm[1] + " " + vm[2] : latest.name;
+            }
+        }
+        var arts = entries.filter(function (e) { return !e.isDir; }).slice(0, 40).map(function (e) {
+            var a = { name: e.name, url: urlOf(e), size: e.size };
+            if (/\.dsc$/i.test(e.name)) a.kind = "dsc";
+            return a;
         });
         cb(null, {
             id: latest.name + "|" + (latest.time || ""),
-            version: latest.name + (latest.isDir ? "/" : ""),
+            version: version || (latest.name + (latest.isDir ? "/" : "")),
             time: latest.time,
             link: base,
+            typeLabel: isDeb ? "Debian (dsc)" : null,
             artifacts: arts
         });
     });
