@@ -41,6 +41,13 @@ KCM.SimpleKCM {
         });
     }
 
+    // Remove inside a page function: the delegate that fired the click is destroyed by lm.remove(),
+    // so anything after it in the delegate's own handler could silently not run.
+    function removeAt(i) {
+        lm.remove(i);
+        syncList();
+    }
+
     function syncList() {
         var arr = [];
         for (var i = 0; i < lm.count; i++) {
@@ -131,12 +138,12 @@ KCM.SimpleKCM {
         Kirigami.InlineMessage {
             Layout.fillWidth: true
             visible: true
-            text: i18n("Supported: github.com/OWNER/REPO/releases, f-droid.org/packages/APP.ID, packages.debian.org/SUITE/PACKAGE, or any web directory listing (a listing containing .dsc files is treated as a Debian package and shows only .dsc/.deb files). The optional filter is a case-insensitive regular expression; only artifacts / files whose name matches are kept. Example for 7-Zip: linux-x64|lzma|src")
+            text: i18n("Supported: github.com/OWNER/REPO/releases, f-droid.org/packages/APP.ID, packages.debian.org/SUITE/PACKAGE, or any web directory listing (release folders such as 7.1.4/ are entered automatically; a listing with .dsc files is treated as a Debian package) or a normal web page with download links. The optional filter is a case-insensitive regular expression; only artifacts / files whose name matches are kept. Example for 7-Zip: linux-x64|lzma|src")
         }
 
         Repeater {
             model: lm
-            delegate: RowLayout {
+            delegate: ColumnLayout {
                 id: entry
                 required property int index
                 required property string itemName
@@ -146,31 +153,40 @@ KCM.SimpleKCM {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
 
-                QQC2.TextField {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-                    placeholderText: i18n("Name")
-                    text: entry.itemName
-                    onTextEdited: { lm.setProperty(entry.index, "itemName", text); page.syncList(); }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.TextField {
+                        Layout.fillWidth: true
+                        Layout.horizontalStretchFactor: 2
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                        placeholderText: i18n("Name")
+                        text: entry.itemName
+                        onTextEdited: { lm.setProperty(entry.index, "itemName", text); page.syncList(); }
+                    }
+                    QQC2.TextField {
+                        Layout.fillWidth: true
+                        Layout.horizontalStretchFactor: 5
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+                        placeholderText: i18n("URL")
+                        text: entry.itemUrl
+                        onTextEdited: { lm.setProperty(entry.index, "itemUrl", text); page.syncList(); }
+                    }
+                    QQC2.Button {
+                        icon.name: "list-remove"
+                        QQC2.ToolTip.text: i18n("Remove")
+                        QQC2.ToolTip.visible: hovered
+                        onClicked: page.removeAt(entry.index)
+                    }
                 }
                 QQC2.TextField {
                     Layout.fillWidth: true
-                    Layout.minimumWidth: Kirigami.Units.gridUnit * 14
-                    placeholderText: i18n("URL")
-                    text: entry.itemUrl
-                    onTextEdited: { lm.setProperty(entry.index, "itemUrl", text); page.syncList(); }
-                }
-                QQC2.TextField {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 9
-                    placeholderText: i18n("Filter, e.g. linux-x64|lzma|src")
+                    placeholderText: i18n("Filter (regular expression, optional)")
                     text: entry.itemFilter
                     onTextEdited: { lm.setProperty(entry.index, "itemFilter", text); page.syncList(); }
                 }
-                QQC2.Button {
-                    icon.name: "list-remove"
-                    QQC2.ToolTip.text: i18n("Remove")
-                    QQC2.ToolTip.visible: hovered
-                    onClicked: { lm.remove(entry.index); page.syncList(); }
-                }
+                Kirigami.Separator { Layout.fillWidth: true }
             }
         }
 

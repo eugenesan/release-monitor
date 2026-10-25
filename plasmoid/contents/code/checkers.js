@@ -2,9 +2,18 @@
 
 /*
  * Release Monitor - source checkers.
- * Every checker calls cb(err, result) where result is:
- *   { id, version, time (ms epoch or null), link, artifacts: [{name, url, size}] }
+ * Every checker finishes by calling ctx.done(err, result) exactly once, where result is:
+ *   { id, version, time (ms epoch or null), link, typeLabel (optional),
+ *     artifacts: [{name, url, size, group?, kind?}] }
+ * Any exception thrown inside an async callback is turned into an error message
+ * (ctx.fail) so a check can never silently hang.
  */
+
+var UA = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0 ReleaseMonitor";
+
+// File types treated as downloadable artifacts when scanning a normal web page
+var ARTIFACT_RE = new RegExp("\\.(exe|msi|msix|zip|7z|rar|tar\\.(gz|xz|bz2|zst|lz)|tgz|txz|tbz2|deb|rpm|dmg|pkg|"
+    + "appimage|apk|aab|iso|img|jar|whl|snap|flatpak|xpi|crx|run|bin|asc|sig|sha256|sha512|sha1|md5|sha256sum|sha512sum)$", "i");
 
 function detectType(url) {
     var u = String(url).toLowerCase();
@@ -19,7 +28,7 @@ function typeLabel(type) {
     case "github": return "GitHub";
     case "fdroid": return "F-Droid";
     case "debian": return "Debian";
-    default: return "Directory";
+    default: return "Web / directory";
     }
 }
 
@@ -38,18 +47,23 @@ function defaultName(url) {
     default:
         m = /\/\/([^\/]+)(\/.*)?$/.exec(url);
         if (!m) return url;
-        var parts = (m[2] || "").split("/").filter(function (s) { return s; });
+        var parts = (m[2] || "").replace(/[?#].*$/, "").split("/").filter(function (s) { return s; });
         return parts.length ? parts[parts.length - 1] : m[1];
     }
 }
 
-function request(method, url, headers, cb) {
+// ---------------------------------------------------------------- helpers
+function request(ctx, method, url, headers, cb) {
     var xhr = new XMLHttpRequest();
     xhr.onreadystatechange = function () {
         if (xhr.readyState !== 4) return;
-        if (xhr.status >= 200 && xhr.status < 300) cb(null, xhr.responseText, xhr);
-        else if (xhr.status === 0) cb("Network error", null, xhr);
-        else cb("HTTP " + xhr.status, null, xhr);
+        try {
+            if (xhr.status >= 200 && xhr.status < 300) cb(null, xhr.responseText, xhr);
+            else if (xhr.status === 0) cb("Network error", null, xhr);
+            else cb("HTTP " + xhr.status, null, xhr);
+        } catch (e) {
+            ctx.fail("Internal error: " + e);
+        }
     };
     xhr.open(method, url);
     xhr.timeout = 30000;
@@ -77,50 +91,118 @@ function natCmp(a, b) {
     return 0;
 }
 
+function safeDecode(s) {
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+
+function originOf(url) {
+    var m = /^(https?:\/\/[^\/?#]+)/i.exec(url);
+    return m ? m[1] : "";
+}
+
+// directory part of a URL, always ending with "/"
+function dirOf(url) {
+    var u = url.replace(/[?#].*$/, "");
+    var origin = originOf(u);
+    if (u.length <= origin.length) return origin + "/";
+    return u.substring(0, u.lastIndexOf("/") + 1);
+}
+
+function normalizePath(url) {
+    var m = /^(https?:\/\/[^\/?#]+)([^?#]*)(.*)$/i.exec(url);
+    if (!m) return url;
+    var out = [];
+    m[2].split("/").forEach(function (seg, i, all) {
+        if (seg === "..") { if (out.length > 1) out.pop(); }
+        else if (seg !== "." && !(seg === "" && i > 0 && i < all.length - 1)) out.push(seg);
+    });
+    return m[1] + out.join("/") + m[3];
+}
+
+function resolveUrl(href, pageUrl) {
+    href = href.replace(/&amp;/g, "&").trim();
+    if (!href || href.charAt(0) === "#") return null;
+    if (/^[a-z][a-z0-9+.\-]*:/i.test(href)) return /^https?:/i.test(href) ? href : null;
+    if (href.indexOf("//") === 0) return pageUrl.replace(/\/\/.*$/, "") + href;
+    if (href.charAt(0) === "/") return originOf(pageUrl) + href;
+    return normalizePath(dirOf(pageUrl) + href);
+}
+
+function toName(url) {
+    var path = url.replace(/[?#].*$/, "");
+    return safeDecode(path.substring(path.lastIndexOf("/") + 1));
+}
+
 // ---------------------------------------------------------------- GitHub
-function checkGithub(item, opts, re, cb) {
+function githubAtom(ctx, owner, repo, apiError) {
+    var feed = "https://github.com/" + owner + "/" + repo + "/releases.atom";
+    request(ctx, "GET", feed, {}, function (err, xml) {
+        if (err) { ctx.done(apiError); return; }
+        var em = /<entry>([\s\S]*?)<\/entry>/.exec(xml);
+        if (!em) { ctx.done(apiError); return; }
+        var link = /<link[^>]*href="([^"]+)"/.exec(em[1]);
+        var tag = link ? safeDecode(link[1].substring(link[1].lastIndexOf("/") + 1)) : null;
+        var upd = /<updated>([^<]+)<\/updated>/.exec(em[1]);
+        var t = upd ? Date.parse(upd[1]) : NaN;
+        if (!tag) { ctx.done(apiError); return; }
+        ctx.done(null, {
+            id: tag, version: tag, time: isNaN(t) ? null : t,
+            link: link[1], typeLabel: "GitHub (feed)", artifacts: []
+        });
+    });
+}
+
+function checkGithub(ctx) {
+    var item = ctx.item, opts = ctx.opts;
     var m = /github\.com\/([^\/]+)\/([^\/?#]+)/i.exec(item.url);
-    var repo = m[2].replace(/\.git$/, "");
-    var api = "https://api.github.com/repos/" + m[1] + "/" + repo + "/releases?per_page=15";
+    var owner = m[1], repo = m[2].replace(/\.git$/, "");
+    var api = "https://api.github.com/repos/" + owner + "/" + repo + "/releases?per_page=15";
     var headers = { "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
     if (opts.githubToken) headers["Authorization"] = "Bearer " + opts.githubToken;
 
-    request("GET", api, headers, function (err, text, xhr) {
+    request(ctx, "GET", api, headers, function (err, text, xhr) {
         if (err) {
+            var msg = err;
             if (xhr && (xhr.status === 403 || xhr.status === 429))
-                err += " (GitHub API rate limit? Set a token in the settings)";
-            cb(err);
+                msg += " (GitHub API rate limit? Set a token in the settings)";
+            // The public Atom feed has no rate limit: at least report the newest release
+            githubAtom(ctx, owner, repo, msg);
             return;
         }
         var list;
-        try { list = JSON.parse(text); } catch (e) { cb("Bad JSON from GitHub API"); return; }
-        list = list.filter(function (r) { return !r.draft; });
-        if (!list.length) { cb("No releases found"); return; }
+        try { list = JSON.parse(text); } catch (e) { githubAtom(ctx, owner, repo, "Bad JSON from GitHub API"); return; }
+        if (!Array.isArray(list)) {
+            githubAtom(ctx, owner, repo, "GitHub API: " + ((list && list.message) || "unexpected response"));
+            return;
+        }
+        list = list.filter(function (r) { return r && !r.draft; });
+        if (!list.length) { ctx.done("No releases found"); return; }
         var rel = list.filter(function (r) { return !r.prerelease; })[0] || list[0];
-        var arts = (rel.assets || []).map(function (a) {
+        var arts = (rel.assets || []).filter(function (a) { return a && a.browser_download_url; }).map(function (a) {
             return { name: a.name, url: a.browser_download_url, size: a.size };
         });
         var t = Date.parse(rel.published_at || rel.created_at);
-        cb(null, {
-            id: String(rel.id),
-            version: rel.tag_name || rel.name,
+        ctx.done(null, {
+            id: String(rel.id || rel.tag_name),
+            version: rel.tag_name || rel.name || String(rel.id),
             time: isNaN(t) ? null : t,
-            link: rel.html_url,
-            artifacts: filterArtifacts(arts, re)
+            link: rel.html_url || item.url,
+            artifacts: filterArtifacts(arts, ctx.re)
         });
     });
 }
 
 // ---------------------------------------------------------------- F-Droid
-function checkFdroid(item, opts, re, cb) {
+function checkFdroid(ctx) {
+    var item = ctx.item, re = ctx.re;
     var m = /packages\/([^\/?#]+)/i.exec(item.url);
     var pkg = m[1];
-    request("GET", "https://f-droid.org/api/v1/packages/" + pkg, { "Accept": "application/json" }, function (err, text) {
-        if (err) { cb(err); return; }
+    request(ctx, "GET", "https://f-droid.org/api/v1/packages/" + pkg, { "Accept": "application/json" }, function (err, text) {
+        if (err) { ctx.done(err); return; }
         var j;
-        try { j = JSON.parse(text); } catch (e) { cb("Bad JSON from F-Droid API"); return; }
+        try { j = JSON.parse(text); } catch (e) { ctx.done("Bad JSON from F-Droid API"); return; }
         var list = j.packages || [];
-        if (!list.length) { cb("No versions found"); return; }
+        if (!list.length) { ctx.done("No versions found"); return; }
         var cur = list.filter(function (p) { return p.versionCode === j.suggestedVersionCode; })[0] || list[0];
         var vc = String(cur.versionCode);
         var base = "https://f-droid.org/repo/" + pkg + "_" + vc;
@@ -134,15 +216,12 @@ function checkFdroid(item, opts, re, cb) {
         };
 
         function finish(buildArts) {
-            var all = [apk].concat(buildArts);
-            result.artifacts = filterArtifacts(all, re);
-            cb(null, result);
+            result.artifacts = filterArtifacts([apk].concat(buildArts), re);
+            ctx.done(null, result);
         }
 
-        // The package page lists the files that belong to a version
-        // (apk, signature, source tarball, build log...). Parse them from the page,
-        // and fall back to the well-known file names if nothing is found.
-        request("GET", item.url, {}, function (err2, html) {
+        // The package page lists the files of a version (apk, signature, source, build log...)
+        request(ctx, "GET", item.url, {}, function (err2, html) {
             var found = [], seen = {};
             seen[apk.name] = true;
             if (!err2 && html) {
@@ -157,7 +236,7 @@ function checkFdroid(item, opts, re, cb) {
                     if (href.indexOf(vc) < 0) continue;
                     if (href.charAt(0) === "/") href = "https://f-droid.org" + href;
                     if (!/^https?:\/\/[^\/]*f-droid\.org\//i.test(href)) continue;
-                    var fname = decodeURIComponent(href.substring(href.lastIndexOf("/") + 1).replace(/[?#].*$/, ""));
+                    var fname = toName(href);
                     if (!fname || seen[fname]) continue;
                     seen[fname] = true;
                     found.push({ name: fname, url: href, group: "build" });
@@ -183,56 +262,60 @@ function debUrl(href) {
     return href;
 }
 
-function fetchDebs(suite, pkg, archs, cb) {
+function fetchDebs(ctx, suite, pkg, archs, cb) {
     if (!archs.length) { cb([]); return; }
-    var arch = archs[0];
-    var url = "https://packages.debian.org/" + suite + "/" + arch + "/" + pkg + "/download";
-    request("GET", url, {}, function (err, html) {
-        if (err || !html) { fetchDebs(suite, pkg, archs.slice(1), cb); return; }
-        var re = /href="([^"]+\.deb)"/g, m, seen = {}, out = [];
-        while ((m = re.exec(html)) !== null) {
+    var url = "https://packages.debian.org/" + suite + "/" + archs[0] + "/" + pkg + "/download";
+    request(ctx, "GET", url, {}, function (err, html) {
+        if (err || !html) { fetchDebs(ctx, suite, pkg, archs.slice(1), cb); return; }
+        var m = /href="([^"]+\.deb)"/.exec(html);
+        if (m) {
             var u = debUrl(m[1]);
-            var name = decodeURIComponent(u.substring(u.lastIndexOf("/") + 1));
-            if (seen[name]) continue;
-            seen[name] = true;
-            out.push({ name: name, url: u });
-            break; // first mirror link is enough, they all point to the same file
+            cb([{ name: toName(u), url: u }]);
+        } else {
+            fetchDebs(ctx, suite, pkg, archs.slice(1), cb);
         }
-        if (out.length) cb(out);
-        else fetchDebs(suite, pkg, archs.slice(1), cb);
     });
 }
 
-function checkDebian(item, opts, re, cb) {
+function checkDebian(ctx) {
+    var item = ctx.item, opts = ctx.opts;
     var m = /packages\.debian\.org\/(?:[a-z]{2}(?:-[a-z]+)?\/)?([^\/?#]+)\/([^\/?#]+)/i.exec(item.url);
-    if (!m) { cb("Cannot parse Debian package URL (expected packages.debian.org/SUITE/PACKAGE)"); return; }
+    if (!m) { ctx.done("Cannot parse Debian package URL (expected packages.debian.org/SUITE/PACKAGE)"); return; }
     var suite = m[1], pkg = m[2];
-    request("GET", item.url, {}, function (err, html) {
-        if (err) { cb(err); return; }
+    request(ctx, "GET", item.url, {}, function (err, html) {
+        if (err) { ctx.done(err); return; }
         var vm = /<h1>\s*Package:\s*[^\s<]+\s*\(([^\s)<]+)/i.exec(html);
-        if (!vm) { cb("Could not find the version on the Debian package page"); return; }
+        if (!vm) { ctx.done("Could not find the version on the Debian package page"); return; }
         var version = vm[1];
         var arch = opts.debianArch || "amd64";
-        fetchDebs(suite, pkg, arch === "all" ? ["all"] : [arch, "all"], function (arts) {
-            arts = filterArtifacts(arts, re);
+        fetchDebs(ctx, suite, pkg, arch === "all" ? ["all"] : [arch, "all"], function (arts) {
+            arts = filterArtifacts(arts, ctx.re);
             var result = { id: version, version: version, time: null, link: item.url, artifacts: arts };
-            if (!arts.length) { cb(null, result); return; }
-            // Best effort: use Last-Modified of the .deb on the mirror as release time
-            request("HEAD", arts[0].url, {}, function (e2, t2, xhr) {
-                if (!e2 && xhr) {
-                    var lm = xhr.getResponseHeader("Last-Modified");
-                    var t = lm ? Date.parse(lm) : NaN;
-                    if (!isNaN(t)) result.time = t;
-                    var len = parseInt(xhr.getResponseHeader("Content-Length"), 10);
-                    if (len > 0) arts[0].size = len;
-                }
-                cb(null, result);
+            if (!arts.length) { ctx.done(null, result); return; }
+            lastModified(ctx, arts[0], function (t, len) {
+                if (t) result.time = t;
+                if (len) arts[0].size = len;
+                ctx.done(null, result);
             });
         });
     });
 }
 
-// ---------------------------------------------------------------- Directory listing
+// Best effort: Last-Modified / Content-Length of an artifact via HEAD
+function lastModified(ctx, art, cb) {
+    request(ctx, "HEAD", art.url, {}, function (err, text, xhr) {
+        var t = 0, len = 0;
+        if (!err && xhr) {
+            var lm = xhr.getResponseHeader("Last-Modified");
+            var p = lm ? Date.parse(lm) : NaN;
+            if (!isNaN(p)) t = p;
+            len = parseInt(xhr.getResponseHeader("Content-Length"), 10) || 0;
+        }
+        cb(t, len);
+    });
+}
+
+// ---------------------------------------------------------------- Directory listings
 function parseDate(s) {
     var d = /(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?/.exec(s), t;
     if (d) {
@@ -281,12 +364,17 @@ function parseListing(html, base) {
         tail = tail.replace(/<[^>]+>/g, " ");
 
         var isDir = href.charAt(href.length - 1) === "/";
-        var rel = href.replace(/\/$/, "");
-        var name;
-        try { name = decodeURIComponent(rel); } catch (e) { name = rel; }
+        var name = safeDecode(href.replace(/\/$/, ""));
         out.push({ name: name, href: href, isDir: isDir, time: parseDate(tail), size: isDir ? 0 : parseSize(tail) });
     }
     return out;
+}
+
+function looksLikeListing(html, entries) {
+    if (/<title>[^<]*Index of|<h1>[^<]*Index of/i.test(html)) return true;
+    if (!entries.length) return false;
+    var dated = entries.filter(function (e) { return e.time; }).length;
+    return dated >= Math.max(1, entries.length / 2);
 }
 
 function sortNewestFirst(entries) {
@@ -298,61 +386,179 @@ function sortNewestFirst(entries) {
     return entries;
 }
 
-function checkDirectory(item, opts, re, cb) {
-    var base = item.url.replace(/[?#].*$/, "");
-    if (base.charAt(base.length - 1) !== "/") base += "/";
-    request("GET", base, {}, function (err, html) {
-        if (err) { cb(err); return; }
-        var all = parseListing(html, base);
-        // A listing with at least one .dsc file is a Debian source/binary package directory
-        var isDeb = all.some(function (e) { return !e.isDir && /\.dsc$/i.test(e.name); });
-        var entries = all.filter(function (e) { return !re || re.test(e.name); });
-        if (isDeb) entries = entries.filter(function (e) { return !e.isDir && /\.(dsc|deb)$/i.test(e.name); });
-        if (!entries.length) { cb("No matching entries found in the listing"); return; }
-        sortNewestFirst(entries);
+// "7.1.4", "v2.0", "2024-05-01" ...
+function isStrictVersion(name) { return /^v?\d+(?:[._-]\d+)*$/.test(name); }
+function isLooseVersion(name) { return /^v?\d/.test(name); }
 
-        function urlOf(e) { return /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href; }
+var MAX_DEPTH = 3;
+var MAX_ARTIFACTS = 60;
 
-        var latest = entries[0], version = null;
-        if (isDeb) {
-            var dscs = entries.filter(function (e) { return /\.dsc$/i.test(e.name); });
-            if (dscs.length) {
-                latest = dscs[0];
-                var vm = /^(.+?)_(.+)\.dsc$/i.exec(latest.name);
-                version = vm ? vm[1] + " " + vm[2] : latest.name;
-            }
+// Result for a listing that is a flat list of release files
+function flatResult(ctx, base, entries) {
+    var isDeb = entries.some(function (e) { return !e.isDir && /\.dsc$/i.test(e.name); });
+    var list = entries.filter(function (e) { return !ctx.re || ctx.re.test(e.name); });
+    if (isDeb) list = list.filter(function (e) { return !e.isDir && /\.(dsc|deb)$/i.test(e.name); });
+    if (!list.length) return { error: "No matching entries found in the listing" };
+    sortNewestFirst(list);
+
+    var latest = list[0], version = null;
+    if (isDeb) {
+        var dscs = list.filter(function (e) { return /\.dsc$/i.test(e.name); });
+        if (dscs.length) {
+            latest = dscs[0];
+            var vm = /^(.+?)_(.+)\.dsc$/i.exec(latest.name);
+            version = vm ? vm[1] + " " + vm[2] : latest.name;
         }
-        var arts = entries.filter(function (e) { return !e.isDir; }).slice(0, 40).map(function (e) {
-            var a = { name: e.name, url: urlOf(e), size: e.size };
-            if (/\.dsc$/i.test(e.name)) a.kind = "dsc";
-            return a;
+    }
+    return { result: {
+        id: latest.name + "|" + (latest.time || ""),
+        version: version || (latest.name + (latest.isDir ? "/" : "")),
+        time: latest.time,
+        link: base,
+        typeLabel: isDeb ? "Debian (dsc)" : "Directory",
+        artifacts: artifactsOf(base, list)
+    } };
+}
+
+function artifactsOf(base, list) {
+    return list.filter(function (e) { return !e.isDir; }).slice(0, MAX_ARTIFACTS).map(function (e) {
+        var a = { name: e.name, url: /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href, size: e.size };
+        if (/\.dsc$/i.test(e.name)) a.kind = "dsc";
+        return a;
+    });
+}
+
+// Walk a listing. If it contains version-named sub-directories (7.1.4/, v2.0/ ...), the newest one
+// is entered (up to MAX_DEPTH levels) and its files are the release artifacts.
+function walkListing(ctx, base, html, depth, trail, cb) {
+    var entries = parseListing(html, base);
+    var dirs = entries.filter(function (e) { return e.isDir; });
+    var cands = dirs.filter(function (e) { return isStrictVersion(e.name); });
+    if (!cands.length) cands = dirs.filter(function (e) { return isLooseVersion(e.name); });
+
+    if (!cands.length || depth >= MAX_DEPTH) {
+        var flat = flatResult(ctx, base, entries);
+        if (flat.error) { cb(trail.length ? "No matching files in " + trail[trail.length - 1].name + "/" : flat.error); return; }
+        var r = flat.result;
+        if (trail.length) {
+            // release = the version directory we descended into
+            var dir = trail[trail.length - 1];
+            r.id = trail.map(function (d) { return d.name; }).join("/");
+            r.version = dir.name;
+            r.time = dir.time || r.time;
+            r.typeLabel = r.typeLabel === "Debian (dsc)" ? r.typeLabel : "Directory";
+        }
+        cb(null, r);
+        return;
+    }
+
+    cands.sort(function (a, b) { return natCmp(b.name, a.name); });   // newest first
+    var tries = cands.slice(0, 3), idx = 0, lastErr = "No release directory found";
+
+    function next() {
+        if (idx >= tries.length) { cb(lastErr); return; }
+        var d = tries[idx++];
+        var sub = base + (/^[a-z]+:\/\//i.test(d.href) ? d.href.substring(base.length) : d.href);
+        if (sub.charAt(sub.length - 1) !== "/") sub += "/";
+        request(ctx, "GET", sub, { "User-Agent": UA }, function (err, subHtml) {
+            if (err) { lastErr = err; next(); return; }
+            walkListing(ctx, sub, subHtml, depth + 1, trail.concat([d]), function (err2, res) {
+                if (err2) { lastErr = err2; next(); }      // empty / filtered-out release dir: try the previous one
+                else cb(null, res);
+            });
         });
-        cb(null, {
-            id: latest.name + "|" + (latest.time || ""),
-            version: version || (latest.name + (latest.isDir ? "/" : "")),
-            time: latest.time,
-            link: base,
-            typeLabel: isDeb ? "Debian (dsc)" : null,
-            artifacts: arts
-        });
+    }
+    next();
+}
+
+// A normal web page: collect links to downloadable files
+function checkPageLinks(ctx, pageUrl, html) {
+    var re = /<a\s+[^>]*?href\s*=\s*(["'])(.*?)\1/gi, m, seen = {}, arts = [];
+    while ((m = re.exec(html)) !== null) {
+        var url = resolveUrl(m[2], pageUrl);
+        if (!url) continue;
+        var name = toName(url);
+        if (!ARTIFACT_RE.test(name)) {
+            // download.php?file=Setup_1.2.exe style links
+            var q = /[?&][^=&]*=([^&#]+)/g, qm, qname = null;
+            while ((qm = q.exec(url)) !== null) {
+                var v = safeDecode(qm[1]);
+                if (ARTIFACT_RE.test(v)) { qname = v.substring(v.lastIndexOf("/") + 1); break; }
+            }
+            if (!qname) continue;
+            name = qname;
+        }
+        if (seen[url]) continue;
+        seen[url] = true;
+        arts.push({ name: name, url: url });
+    }
+    if (!arts.length) { ctx.done("No download links found on the page"); return; }
+
+    // newest version token found in the file names
+    var best = null;
+    arts.forEach(function (a) {
+        var vr = /\d+(?:\.\d+)+/g, vm;
+        while ((vm = vr.exec(a.name)) !== null)
+            if (best === null || natCmp(vm[0], best) > 0) best = vm[0];
+    });
+    var mine = best ? arts.filter(function (a) { return a.name.indexOf(best) >= 0; }) : arts;
+    if (!mine.length) mine = arts;
+    mine = filterArtifacts(mine, ctx.re);
+    if (!mine.length) { ctx.done("No matching download links on the page"); return; }
+    mine = mine.slice(0, MAX_ARTIFACTS);
+
+    var names = mine.map(function (a) { return a.name; }).sort().join("|");
+    var result = {
+        id: best || names,
+        version: best || mine[0].name,
+        time: null,
+        link: pageUrl,
+        typeLabel: "Web page",
+        artifacts: mine
+    };
+    lastModified(ctx, mine[0], function (t, len) {
+        if (t) result.time = t;
+        if (len) mine[0].size = len;
+        ctx.done(null, result);
+    });
+}
+
+function checkWeb(ctx) {
+    var url = ctx.item.url.replace(/#.*$/, "");
+    request(ctx, "GET", url, { "User-Agent": UA }, function (err, html) {
+        if (err) { ctx.done(err); return; }
+        var base = dirOf(url);
+        var entries = parseListing(html, base);
+        if (looksLikeListing(html, entries)) {
+            var listBase = url.replace(/[?#].*$/, "");
+            if (listBase.charAt(listBase.length - 1) !== "/") listBase += "/";
+            walkListing(ctx, listBase, html, 0, [], ctx.done);
+        } else {
+            checkPageLinks(ctx, url, html);
+        }
     });
 }
 
 // ---------------------------------------------------------------- entry point
 function check(item, opts, cb) {
-    var re = null;
+    var finished = false;
+    var ctx = {
+        item: item, opts: opts, re: null,
+        done: function (err, res) { if (finished) return; finished = true; cb(err, res); },
+        fail: function (msg) { ctx.done(msg); }
+    };
     if (item.filter) {
-        try { re = new RegExp(item.filter, "i"); }
-        catch (e) { cb("Invalid filter regex: " + e.message); return; }
+        try { ctx.re = new RegExp(item.filter, "i"); }
+        catch (e) { ctx.done("Invalid filter regex: " + e.message); return; }
     }
     try {
         switch (detectType(item.url)) {
-        case "github": checkGithub(item, opts, re, cb); break;
-        case "fdroid": checkFdroid(item, opts, re, cb); break;
-        case "debian": checkDebian(item, opts, re, cb); break;
-        default: checkDirectory(item, opts, re, cb);
+        case "github": checkGithub(ctx); break;
+        case "fdroid": checkFdroid(ctx); break;
+        case "debian": checkDebian(ctx); break;
+        default: checkWeb(ctx);
         }
     } catch (e) {
-        cb(String(e));
+        ctx.fail(String(e));
     }
 }

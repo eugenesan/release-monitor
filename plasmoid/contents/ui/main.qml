@@ -269,19 +269,38 @@ PlasmoidItem {
         items.forEach(function (it) { checkOne(it); });
     }
 
+    property var tokens: ({})       // url -> id of the running check (late answers of timed-out checks are ignored)
+    property var startedAt: ({})    // url -> start time of the running check
+
     function checkOne(item) {
         if (busy[item.url]) return;
         busy[item.url] = true;
         checkingCount++;
+        var token = (tokens[item.url] || 0) + 1;
+        tokens[item.url] = token;
+        startedAt[item.url] = Date.now();
 
-        Checkers.check(item, { githubToken: cfg.githubToken, debianArch: cfg.debianArch }, function (err, res) {
+        function finish(err, res) {
+            if (tokens[item.url] !== token) return;          // superseded by the watchdog
             busy[item.url] = false;
             checkingCount--;
+            delete startedAt[item.url];
+            applyResult(item, err, res);
+        }
 
-            var st = states[item.url] || {};
-            st.lastCheck = Date.now();
-            if (err) {
-                st.error = err;
+        try {
+            Checkers.check(item, { githubToken: cfg.githubToken, debianArch: cfg.debianArch }, finish);
+        } catch (e) {
+            finish("Internal error: " + e);
+        }
+    }
+
+    function applyResult(item, err, res) {
+        var st = states[item.url] || {};
+        st.lastCheck = Date.now();
+        try {
+            if (err || !res) {
+                st.error = err || i18n("Empty result");
             } else {
                 st.error = "";
                 var hadPrevious = !!st.id;
@@ -304,10 +323,31 @@ PlasmoidItem {
                     st.typeLabel = res.typeLabel || "";
                 }
             }
-            states[item.url] = st;
-            persist();
-            rebuildRows();
-        });
+        } catch (e) {
+            st.error = "Internal error: " + e;
+        }
+        states[item.url] = st;
+        persist();
+        rebuildRows();
+    }
+
+    // A check that never answers must not leave the item stuck on "never checked"
+    Timer {
+        interval: 15000
+        repeat: true
+        running: root.checkingCount > 0
+        onTriggered: {
+            var limit = Date.now() - 90000;
+            Object.keys(root.startedAt).forEach(function (url) {
+                if (root.startedAt[url] > limit) return;
+                root.tokens[url] = (root.tokens[url] || 0) + 1;
+                root.busy[url] = false;
+                root.checkingCount--;
+                delete root.startedAt[url];
+                var item = root.findItem(url);
+                if (item) root.applyResult(item, i18n("Timed out"), null);
+            });
+        }
     }
 
     // ------------------------------------------------------------ notifications
