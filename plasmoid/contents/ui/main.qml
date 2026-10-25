@@ -102,21 +102,30 @@ PlasmoidItem {
         return null;
     }
 
-    // Flat list of table cells for the tooltip: [{text, header, span, error}]
+    // Flat list of table cells for the tooltip: [{text, header, span, error, lastCol, lastRow}]
     function tooltipCells(list) {
-        var cells = [];
-        [i18n("Name"), i18n("Last release"), i18n("Release time"), i18n("Last check")].forEach(function (t) {
-            cells.push({ text: t, header: true, span: 1, error: false });
-        });
+        var cells = [], rowsOut = [];
+        rowsOut.push([i18n("Name"), i18n("Last release"), i18n("Release time"), i18n("Last check")]);
         list.forEach(function (r) {
             var st = r.st || {};
             var rel = fmtTime(st.time) + (st.time && st.timeIsSeen ? " *" : "");
-            cells.push({ text: r.name + (st.fresh ? " (" + i18n("new") + ")" : ""), header: false, span: 1, error: false });
-            cells.push({ text: st.version || "—", header: false, span: 1, error: false });
-            cells.push({ text: rel, header: false, span: 1, error: false });
-            cells.push({ text: st.lastCheck ? fmtTime(st.lastCheck) : i18n("never"), header: false, span: 1, error: false });
-            if (st.error)
-                cells.push({ text: "⚠ " + st.error, header: false, span: 4, error: true });
+            rowsOut.push([
+                r.name + (st.fresh ? " (" + i18n("new") + ")" : ""),
+                st.version || "—",
+                rel,
+                st.lastCheck ? fmtTime(st.lastCheck) : i18n("never")
+            ]);
+            if (st.error) rowsOut.push({ error: "⚠ " + st.error });
+        });
+        rowsOut.forEach(function (row, ri) {
+            var lastRow = (ri === rowsOut.length - 1);
+            if (Array.isArray(row)) {
+                row.forEach(function (t, ci) {
+                    cells.push({ text: t, header: ri === 0, span: 1, error: false, lastCol: ci === 3, lastRow: lastRow });
+                });
+            } else {
+                cells.push({ text: row.error, header: false, span: 4, error: true, lastCol: true, lastRow: lastRow });
+            }
         });
         return cells;
     }
@@ -139,38 +148,65 @@ PlasmoidItem {
                 text: i18n("No URLs configured. Right-click the icon and choose “Configure…”.")
             }
 
-            GridLayout {
+            Rectangle {
                 visible: root.rows.length > 0
-                columns: 4
-                columnSpacing: -1   // overlap borders so lines are 1px wide
-                rowSpacing: -1
+                color: "transparent"
+                border.width: 1
+                border.color: Qt.alpha(Kirigami.Theme.textColor, 0.4)
+                implicitWidth: grid.implicitWidth + 2
+                implicitHeight: grid.implicitHeight + 2
 
-                Repeater {
-                    model: tip.cells
-                    delegate: Rectangle {
-                        id: cell
-                        required property var modelData
-                        Layout.columnSpan: modelData.span
-                        Layout.fillWidth: modelData.span > 1
-                        Layout.fillHeight: true
-                        implicitWidth: modelData.span > 1 ? 1 : cellLabel.implicitWidth + Kirigami.Units.largeSpacing * 2
-                        implicitHeight: cellLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
-                        color: modelData.header ? Qt.alpha(Kirigami.Theme.textColor, 0.12) : "transparent"
-                        border.width: 1
-                        border.color: Qt.alpha(Kirigami.Theme.textColor, 0.35)
+                GridLayout {
+                    id: grid
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    columns: 4
+                    columnSpacing: 0
+                    rowSpacing: 0
 
-                        PlasmaComponents3.Label {
-                            id: cellLabel
-                            anchors.left: parent.left
-                            anchors.right: modelData.span > 1 ? parent.right : undefined
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: Kirigami.Units.largeSpacing
-                            anchors.rightMargin: Kirigami.Units.largeSpacing
-                            text: cell.modelData.text
-                            textFormat: Text.PlainText
-                            elide: cell.modelData.span > 1 ? Text.ElideRight : Text.ElideNone
-                            font.bold: cell.modelData.header
-                            color: cell.modelData.error ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                    Repeater {
+                        model: tip.cells
+                        delegate: Rectangle {
+                            id: cell
+                            required property var modelData
+                            Layout.columnSpan: modelData.span
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            implicitWidth: modelData.span > 1 ? 1 : cellLabel.implicitWidth + Kirigami.Units.largeSpacing * 2
+                            implicitHeight: cellLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
+                            color: modelData.header ? Qt.alpha(Kirigami.Theme.textColor, 0.12) : "transparent"
+
+                            // right and bottom rules (outer frame is drawn by the container)
+                            Rectangle {
+                                visible: !cell.modelData.lastCol
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: 1
+                                color: Qt.alpha(Kirigami.Theme.textColor, 0.4)
+                            }
+                            Rectangle {
+                                visible: !cell.modelData.lastRow
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 1
+                                color: Qt.alpha(Kirigami.Theme.textColor, 0.4)
+                            }
+
+                            PlasmaComponents3.Label {
+                                id: cellLabel
+                                anchors.left: parent.left
+                                anchors.right: cell.modelData.span > 1 ? parent.right : undefined
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: Kirigami.Units.largeSpacing
+                                anchors.rightMargin: Kirigami.Units.largeSpacing
+                                text: cell.modelData.text
+                                textFormat: Text.PlainText
+                                elide: cell.modelData.span > 1 ? Text.ElideRight : Text.ElideNone
+                                font.bold: cell.modelData.header
+                                color: cell.modelData.error ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                            }
                         }
                     }
                 }
@@ -533,9 +569,9 @@ PlasmoidItem {
 
     // ------------------------------------------------------------ popup
     fullRepresentation: PlasmaExtras.Representation {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 24
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 30
         Layout.minimumHeight: Kirigami.Units.gridUnit * 14
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 30
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 35
         Layout.preferredHeight: Kirigami.Units.gridUnit * 26
 
         header: PlasmaExtras.PlasmoidHeading {
@@ -599,6 +635,7 @@ PlasmoidItem {
                         PlasmaComponents3.Label {
                             text: del.st.version || "—"
                             elide: Text.ElideRight
+                            horizontalAlignment: Text.AlignHCenter
                             Layout.fillWidth: true
                             color: Kirigami.Theme.highlightColor
                             font.bold: true
