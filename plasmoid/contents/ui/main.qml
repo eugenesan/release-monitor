@@ -26,7 +26,12 @@ PlasmoidItem {
     property var dlStatus: ({})     // "url|artifact" -> "busy" | "done" | "failed"
     property var rows: []           // derived: [{name, url, filter, type, st}]
     property int checkingCount: 0
-    property int freshCount: 0
+    property int freshCount: 0        // unseen new releases (panel badge)
+    property int newCount: 0          // unseen new releases + just added URLs
+    property int revision: 0          // bumped whenever `states` changes, delegates re-read their state
+    property real now: Date.now()     // ticks while the tooltip is visible
+    property real nextCheck: 0        // ms since epoch of the next scheduled check
+    property bool hovered: false
     property int cmdSeq: 0
 
     readonly property var cfg: Plasmoid.configuration
@@ -52,7 +57,7 @@ PlasmoidItem {
     // "Configure…" is added automatically by Plasma
     Plasmoid.contextualActions: [
         PlasmaCore.Action {
-            text: i18n("Check for updates now")
+            text: i18n("Check all for updates now")
             icon.name: "view-refresh"
             onTriggered: root.checkAll(true)
         }
@@ -103,6 +108,26 @@ PlasmoidItem {
     }
 
     // Flat list of table cells for the tooltip: [{text, header, span, error, lastCol, lastRow}]
+    // "New" = unseen release, just added URL (first result not yet acknowledged), or not checked yet
+    function isNewState(st) {
+        return !!st && (st.fresh === true || st.added === true || !st.lastCheck || (!!st.error && !st.id));
+    }
+
+    readonly property var tipRows: rows.filter(function (r) { return root.isNewState(r.st); })
+
+    function fmtIn(ms) {
+        var m = Math.max(0, Math.ceil(ms / 60000));
+        if (m >= 60) return i18n("%1 h %2 min", Math.floor(m / 60), m % 60);
+        return i18n("%1 min", m);
+    }
+
+    function nextCheckText() {
+        if (nextCheck <= 0) return "—";
+        var d = new Date(nextCheck);
+        var sameDay = d.toDateString() === new Date(now).toDateString();
+        return Qt.formatDateTime(d, sameDay ? "HH:mm" : "yyyy-MM-dd HH:mm") + " (" + i18n("in %1", fmtIn(nextCheck - now)) + ")";
+    }
+
     function tooltipCells(list) {
         var cells = [], rowsOut = [];
         rowsOut.push([i18n("Name"), i18n("Last release"), i18n("Release time"), i18n("Last check")]);
@@ -110,7 +135,7 @@ PlasmoidItem {
             var st = r.st || {};
             var rel = fmtTime(st.time) + (st.time && st.timeIsSeen ? " *" : "");
             rowsOut.push([
-                r.name + (st.fresh ? " (" + i18n("new") + ")" : ""),
+                r.name,
                 st.version || "—",
                 rel,
                 st.lastCheck ? fmtTime(st.lastCheck) : i18n("never")
@@ -135,8 +160,8 @@ PlasmoidItem {
         ColumnLayout {
             id: tip
             spacing: Kirigami.Units.smallSpacing
-            readonly property var cells: root.tooltipCells(root.rows)
-            readonly property bool anySeen: root.rows.some(function (r) { return r.st && r.st.time && r.st.timeIsSeen; })
+            readonly property var cells: root.tooltipCells(root.tipRows)
+            readonly property bool anySeen: root.tipRows.some(function (r) { return r.st && r.st.time && r.st.timeIsSeen; })
 
             PlasmaExtras.Heading {
                 level: 4
@@ -144,12 +169,23 @@ PlasmoidItem {
             }
 
             PlasmaComponents3.Label {
+                text: i18n("Only new and just added URLs are listed here")
+                font.italic: true
+                opacity: 0.7
+            }
+
+            PlasmaComponents3.Label {
                 visible: root.rows.length === 0
                 text: i18n("No URLs configured. Right-click the icon and choose “Configure…”.")
             }
 
+            PlasmaComponents3.Label {
+                visible: root.rows.length > 0 && root.tipRows.length === 0
+                text: i18n("No new releases")
+            }
+
             Rectangle {
-                visible: root.rows.length > 0
+                visible: root.tipRows.length > 0
                 color: "transparent"
                 border.width: 1
                 border.color: Qt.alpha(Kirigami.Theme.textColor, 0.4)
@@ -218,6 +254,10 @@ PlasmoidItem {
                 font.italic: true
                 opacity: 0.7
             }
+
+            PlasmaComponents3.Label {
+                text: i18n("Next update: %1", root.nextCheckText())
+            }
         }
     }
 
@@ -238,14 +278,17 @@ PlasmoidItem {
     }
 
     function rebuildRows() {
-        var fc = 0;
+        var fc = 0, nc = 0;
         var r = items.map(function (it) {
             var st = states[it.url] || {};
             if (st.fresh) fc++;
+            if (st.fresh || st.added) nc++;
             return { name: it.name, url: it.url, filter: it.filter, type: Checkers.detectType(it.url), st: st };
         });
         freshCount = fc;
+        newCount = nc;
         rows = r;
+        revision++;
     }
 
     function persist() {
@@ -253,13 +296,13 @@ PlasmoidItem {
     }
 
     function markSeen(url) {
-        if (states[url]) states[url].fresh = false;
+        if (states[url]) { states[url].fresh = false; states[url].added = false; }
         persist();
         rebuildRows();
     }
 
     function markAllSeen() {
-        for (var k in states) states[k].fresh = false;
+        for (var k in states) { states[k].fresh = false; states[k].added = false; }
         persist();
         rebuildRows();
     }
@@ -304,6 +347,7 @@ PlasmoidItem {
             } else {
                 st.error = "";
                 var hadPrevious = !!st.id;
+                if (!hadPrevious) st.added = true;          // first result for this URL: "just added"
                 if (st.id !== res.id) {
                     var oldVersion = st.version;
                     st.id = res.id;
@@ -539,7 +583,20 @@ PlasmoidItem {
         interval: Math.max(1, root.cfg.intervalMinutes) * 60 * 1000
         repeat: true
         running: true
-        onTriggered: root.checkAll(false)
+        onIntervalChanged: root.nextCheck = Date.now() + interval     // changing the interval restarts the timer
+        onTriggered: {
+            root.nextCheck = Date.now() + interval;
+            root.checkAll(false);
+        }
+    }
+
+    // keeps "in N min" in the tooltip current, only while it can be seen
+    Timer {
+        interval: 15000
+        repeat: true
+        running: root.hovered
+        triggeredOnStart: true
+        onTriggered: root.now = Date.now()
     }
 
     Timer {
@@ -560,6 +617,7 @@ PlasmoidItem {
     Component.onCompleted: {
         try { states = JSON.parse(cfg.stateJson || "{}"); } catch (e) { states = {}; }
         loadItems();
+        nextCheck = Date.now() + pollTimer.interval;
     }
 
     // ------------------------------------------------------------ small reusable button
@@ -575,6 +633,7 @@ PlasmoidItem {
         id: compactRoot
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
         hoverEnabled: true
+        onContainsMouseChanged: root.hovered = containsMouse
 
         onClicked: mouse => {
             if (mouse.button === Qt.MiddleButton) root.checkAll(true);
@@ -625,7 +684,7 @@ PlasmoidItem {
                 IconButton {
                     icon.name: "dialog-ok-apply"
                     text: i18n("Mark all as seen")
-                    visible: root.freshCount > 0
+                    visible: root.newCount > 0
                     onClicked: root.markAllSeen()
                 }
                 IconButton {
@@ -638,39 +697,52 @@ PlasmoidItem {
         }
 
         contentItem: PlasmaComponents3.ScrollView {
-            ListView {
-                id: list
-                model: root.rows
-                clip: true
+            id: scroll
+            contentWidth: availableWidth
+
+            // No elastic overscroll: a fast flick could leave the list scrolled outside its range
+            Component.onCompleted: {
+                if (contentItem) contentItem.boundsBehavior = Flickable.StopAtBounds;
+            }
+
+            ColumnLayout {
+                width: scroll.availableWidth - Kirigami.Units.largeSpacing
                 spacing: Kirigami.Units.largeSpacing
 
                 PlasmaExtras.PlaceholderMessage {
-                    anchors.centerIn: parent
-                    width: parent.width - Kirigami.Units.gridUnit * 4
-                    visible: root.rows.length === 0
+                    Layout.fillWidth: true
+                    visible: root.items.length === 0
                     text: i18n("No URLs configured")
-                    explanation: i18n("Right-click the icon and choose “Configure…” to add GitHub, F-Droid, Debian or directory-listing URLs.")
+                    explanation: i18n("Right-click the icon and choose “Configure…” to add GitHub, F-Droid, Debian, directory or web page URLs.")
                 }
 
-                delegate: ColumnLayout {
+                // The model only changes with the configured URLs; results update the delegates in place
+                Repeater {
+                    model: root.items
+                    delegate: ColumnLayout {
                     id: del
                     required property var modelData
-                    readonly property var st: modelData.st || ({})
+                    readonly property var st: { root.revision; return root.states[modelData.url] || ({}) }
+                    readonly property bool isNew: st.fresh === true || st.added === true
                     readonly property var arts: st.artifacts || []
                     readonly property var plainArts: arts.filter(function (a) { return !a.group; })
                     readonly property var buildArts: arts.filter(function (a) { return a.group === "build"; })
 
-                    width: ListView.view.width - Kirigami.Units.largeSpacing
+                    Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
-                    // line 1: name, last release, buttons
+                    // line 1: fixed-width name | version (centered in what is left) | fixed set of icons
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
                         PlasmaExtras.Heading {
                             level: 4
                             text: del.modelData.name
                             elide: Text.ElideRight
-                            Layout.maximumWidth: Kirigami.Units.gridUnit * 10
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+                            Layout.minimumWidth: Kirigami.Units.gridUnit * 9
+                            Layout.maximumWidth: Kirigami.Units.gridUnit * 9
                         }
                         PlasmaComponents3.Label {
                             text: del.st.version || "—"
@@ -680,22 +752,27 @@ PlasmoidItem {
                             color: Kirigami.Theme.highlightColor
                             font.bold: true
                         }
-                        PlasmaComponents3.Label {
-                            visible: del.st.fresh === true
-                            text: i18n("NEW")
-                            font.bold: true
-                            color: Kirigami.Theme.positiveTextColor
+                        // "new" marker: always present, greyed out when inactive
+                        Kirigami.Icon {
+                            source: "software-update-available"
+                            fallback: "emblem-important"
+                            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                            Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                            opacity: del.isNew ? 1.0 : 0.25
+                            HoverHandler { id: newHover }
+                            QQC2.ToolTip.visible: newHover.hovered && del.isNew
+                            QQC2.ToolTip.text: del.st.fresh === true ? i18n("New release") : i18n("Just added")
+                        }
+                        IconButton {
+                            icon.name: "dialog-ok-apply"
+                            text: i18n("Mark as seen")
+                            enabled: del.isNew
+                            onClicked: root.markSeen(del.modelData.url)
                         }
                         IconButton {
                             icon.name: "link"
                             text: i18n("Open release page")
                             onClicked: Qt.openUrlExternally(del.st.link || del.modelData.url)
-                        }
-                        IconButton {
-                            icon.name: "dialog-ok-apply"
-                            text: i18n("Mark as seen")
-                            visible: del.st.fresh === true
-                            onClicked: root.markSeen(del.modelData.url)
                         }
                         IconButton {
                             icon.name: "download"
@@ -728,7 +805,7 @@ PlasmoidItem {
                         }
                         Item { Layout.fillWidth: true }
                         PlasmaComponents3.Label {
-                            text: del.st.typeLabel || Checkers.typeLabel(del.modelData.type)
+                            text: del.st.typeLabel || Checkers.typeLabel(Checkers.detectType(del.modelData.url))
                             opacity: 0.6
                         }
                     }
@@ -810,6 +887,7 @@ PlasmoidItem {
                     }
 
                     Kirigami.Separator { Layout.fillWidth: true }
+                }
                 }
             }
         }
