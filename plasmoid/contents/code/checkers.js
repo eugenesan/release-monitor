@@ -91,6 +91,29 @@ function natCmp(a, b) {
     return 0;
 }
 
+// Date.parse() of the QML JavaScript engine is picky about non-ISO strings ("20 Oct 2026 08:34 UTC"
+// may give NaN there), so non-ISO dates are computed with Date.UTC() instead.
+var MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+// "Tue, 20 Oct 2026 21:43:10 GMT", "20-Oct-2026 8:34", "20 Oct 2026 08:34" (always read as UTC)
+function parseDayMonYear(str) {
+    var m = /(\d{1,2})[ \-]([A-Za-z]{3})[a-z]*[ \-](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(str || ""));
+    if (!m || MONTHS[m[2].toLowerCase()] === undefined) return NaN;
+    return Date.UTC(+m[3], MONTHS[m[2].toLowerCase()], +m[1], +m[4], +m[5], +(m[6] || 0));
+}
+
+// "Jul 24, 2025" (F-Droid "Added on")
+function parseMonDayYear(str) {
+    var m = /([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})/.exec(String(str || ""));
+    if (!m || MONTHS[m[1].toLowerCase()] === undefined) return NaN;
+    return Date.UTC(+m[3], MONTHS[m[1].toLowerCase()], +m[2]);
+}
+
+function parseHttpDate(str) {
+    var t = parseDayMonYear(str);
+    return isNaN(t) ? Date.parse(str) : t;
+}
+
 function safeDecode(s) {
     try { return decodeURIComponent(s); } catch (e) { return s; }
 }
@@ -227,7 +250,8 @@ function checkFdroid(ctx) {
             if (!err2 && html) {
                 var dm = new RegExp(vc + "[\\s\\S]{0,1500}?Added on\\s*([^<\\n]+)").exec(html);
                 if (dm) {
-                    var t = Date.parse(dm[1].trim());
+                    var t = parseMonDayYear(dm[1].trim());
+                    if (isNaN(t)) t = Date.parse(dm[1].trim());
                     if (!isNaN(t)) result.time = t;
                 }
                 var hre = /href="([^"#][^"]*)"/g, hm;
@@ -307,7 +331,7 @@ function lastModified(ctx, art, cb) {
         var t = 0, len = 0;
         if (!err && xhr) {
             var lm = xhr.getResponseHeader("Last-Modified");
-            var p = lm ? Date.parse(lm) : NaN;
+            var p = lm ? parseHttpDate(lm) : NaN;
             if (!isNaN(p)) t = p;
             len = parseInt(xhr.getResponseHeader("Content-Length"), 10) || 0;
         }
@@ -324,7 +348,7 @@ function parseDate(s) {
     }
     d = /(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}:\d{2})/.exec(s);
     if (d) {
-        t = Date.parse(d[1] + " " + d[2] + " " + d[3] + " " + (d[4].length < 5 ? "0" : "") + d[4] + " UTC");
+        t = parseDayMonYear(d[1] + "-" + d[2] + "-" + d[3] + " " + d[4]);
         return isNaN(t) ? null : t;
     }
     d = /(\d{4}-\d{2}-\d{2})/.exec(s);
@@ -440,7 +464,7 @@ function listingOffset(ctx, base, entries, cb) {
     request(ctx, "HEAD", url, {}, function (err, text, xhr) {
         var off = 0;
         if (!err && xhr) {
-            var lm = Date.parse(xhr.getResponseHeader("Last-Modified") || "");
+            var lm = parseHttpDate(xhr.getResponseHeader("Last-Modified") || "");
             if (!isNaN(lm)) {
                 var q = 15 * 60000, diff = lm - e.time;
                 var r = Math.round(diff / q) * q;
