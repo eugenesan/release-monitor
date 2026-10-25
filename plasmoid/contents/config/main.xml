@@ -28,6 +28,10 @@
             <default>amd64</default>
         </entry>
         <!-- internal: persisted per-URL state (last version/time/check) -->
+        <!-- internal: incremented by the settings page to make the widget forget its release history -->
+        <entry name="resetToken" type="Int">
+            <default>0</default>
+        </entry>
         <entry name="stateJson" type="String">
             <default>{}</default>
         </entry>

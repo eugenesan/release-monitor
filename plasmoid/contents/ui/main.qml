@@ -27,6 +27,7 @@ PlasmoidItem {
     property var rows: []           // derived: [{name, url, filter, type, st}]
     property int checkingCount: 0
     property int freshCount: 0        // unseen new releases (panel badge)
+    property real lastCheckAll: 0     // most recent check over all URLs
     property int newCount: 0          // unseen new releases + just added URLs
     property int revision: 0          // bumped whenever `states` changes, delegates re-read their state
     property real now: Date.now()     // ticks while the tooltip is visible
@@ -39,7 +40,7 @@ PlasmoidItem {
                                            .toString().replace(/^file:\/\//, "")
 
     // ------------------------------------------------------------ plasmoid properties
-    Plasmoid.icon: freshCount > 0 ? "update-high" : "update-none"
+    Plasmoid.icon: newCount > 0 ? "update-high" : "update-none"
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     Plasmoid.busy: checkingCount > 0
 
@@ -60,16 +61,12 @@ PlasmoidItem {
             text: i18n("Check all for updates now")
             icon.name: "view-refresh"
             onTriggered: root.checkAll(true)
-        },
-        PlasmaCore.Action {
-            text: i18n("Forget release history and re-check")
-            icon.name: "edit-clear-history"
-            onTriggered: root.resetHistory()
         }
     ]
 
     // ------------------------------------------------------------ helpers
-    // Forget everything learned about releases (versions, times, new/seen flags) and check again
+    // Forget everything learned about releases (versions, times, new/seen flags) and check again.
+    // Triggered from the settings page through the resetToken counter.
     function resetHistory() {
         states = {};
         persist();
@@ -293,15 +290,17 @@ PlasmoidItem {
     }
 
     function rebuildRows() {
-        var fc = 0, nc = 0;
+        var fc = 0, nc = 0, lc = 0;
         var r = items.map(function (it) {
             var st = states[it.url] || {};
+            if (st.lastCheck > lc) lc = st.lastCheck;
             if (st.fresh) fc++;
             if (st.fresh || st.added) nc++;
             return { name: it.name, url: it.url, filter: it.filter, type: Checkers.detectType(it.url), st: st };
         });
         freshCount = fc;
         newCount = nc;
+        lastCheckAll = lc;
         rows = r;
         revision++;
     }
@@ -610,7 +609,7 @@ PlasmoidItem {
     Timer {
         interval: 15000
         repeat: true
-        running: root.hovered
+        running: root.hovered || root.expanded
         triggeredOnStart: true
         onTriggered: root.now = Date.now()
     }
@@ -624,6 +623,7 @@ PlasmoidItem {
 
     Connections {
         target: Plasmoid.configuration
+        function onResetTokenChanged() { root.resetHistory(); }
         function onUrlsJsonChanged() {
             root.loadItems();
             Qt.callLater(function () { root.checkAll(false); });
@@ -658,13 +658,13 @@ PlasmoidItem {
 
         Kirigami.Icon {
             anchors.fill: parent
-            source: root.freshCount > 0 ? "update-high" : "update-none"
-            fallback: root.freshCount > 0 ? "software-update-available" : "system-software-update"
+            source: root.newCount > 0 ? "update-high" : "update-none"
+            fallback: root.newCount > 0 ? "software-update-available" : "system-software-update"
             active: compactRoot.containsMouse
         }
 
         Rectangle {
-            visible: root.freshCount > 0
+            visible: root.newCount > 0
             anchors.right: parent.right
             anchors.top: parent.top
             height: Math.min(parent.height * 0.5, Kirigami.Units.gridUnit)
@@ -675,7 +675,7 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 id: badgeLabel
                 anchors.centerIn: parent
-                text: root.freshCount
+                text: root.newCount
                 font.pixelSize: parent.height * 0.7
                 color: Kirigami.Theme.highlightedTextColor
             }
@@ -724,6 +724,28 @@ PlasmoidItem {
             ColumnLayout {
                 width: scroll.availableWidth - Kirigami.Units.largeSpacing
                 spacing: Kirigami.Units.largeSpacing
+
+                // list header: when the URLs were last checked / will be checked next
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.items.length > 0
+                    spacing: Kirigami.Units.largeSpacing
+
+                    PlasmaComponents3.Label {
+                        text: i18n("Last check: %1", root.lastCheckAll > 0 ? root.fmtTime(root.lastCheckAll) : i18n("never"))
+                        opacity: 0.8
+                    }
+                    Item { Layout.fillWidth: true }
+                    PlasmaComponents3.Label {
+                        text: i18n("Next update: %1", root.nextCheckText())
+                        opacity: 0.8
+                    }
+                }
+
+                Kirigami.Separator {
+                    Layout.fillWidth: true
+                    visible: root.items.length > 0
+                }
 
                 PlasmaExtras.PlaceholderMessage {
                     Layout.fillWidth: true
@@ -813,10 +835,6 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             text: i18n("Released: %1", root.fmtTime(root.releaseTime(del.st)))
-                            opacity: 0.8
-                        }
-                        PlasmaComponents3.Label {
-                            text: i18n("Last check: %1", del.st.lastCheck ? root.fmtTime(del.st.lastCheck) : i18n("never"))
                             opacity: 0.8
                         }
                         Item { Layout.fillWidth: true }

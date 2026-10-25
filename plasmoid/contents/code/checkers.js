@@ -322,9 +322,9 @@ function parseDate(s) {
         t = Date.parse(d[1] + "T" + d[2] + ":" + (d[3] || "00") + "Z");
         return isNaN(t) ? null : t;
     }
-    d = /(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{2}:\d{2})/.exec(s);
+    d = /(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}:\d{2})/.exec(s);
     if (d) {
-        t = Date.parse(d[1] + " " + d[2] + " " + d[3] + " " + d[4] + " UTC");
+        t = Date.parse(d[1] + " " + d[2] + " " + d[3] + " " + (d[4].length < 5 ? "0" : "") + d[4] + " UTC");
         return isNaN(t) ? null : t;
     }
     d = /(\d{4}-\d{2}-\d{2})/.exec(s);
@@ -337,7 +337,7 @@ function parseDate(s) {
 
 function parseSize(s) {
     var m = /(?:^|\s)(\d+(?:\.\d+)?)\s*([KMGT])?(?=\s|$)/i.exec(s.replace(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?/, "")
-                                                               .replace(/\d{1,2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}/, ""));
+                                                               .replace(/\d{1,2}-[A-Za-z]{3}-\d{4}\s+\d{1,2}:\d{2}/, ""));
     if (!m) return 0;
     var n = parseFloat(m[1]);
     var mult = { K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 }[(m[2] || "").toUpperCase()] || 1;
@@ -428,6 +428,30 @@ function artifactsOf(base, list) {
     });
 }
 
+// Listings print times in the server's time zone (often UTC, sometimes local) and parseDate() reads them as
+// UTC. Compare the newest file's listed time with its Last-Modified header (always GMT) to find the offset.
+// Returns 0 when it cannot be determined reliably.
+function listingOffset(ctx, base, entries, cb) {
+    var files = entries.filter(function (e) { return !e.isDir && e.time; });
+    if (!files.length) { cb(0); return; }
+    sortNewestFirst(files);
+    var e = files[0];
+    var url = /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href;
+    request(ctx, "HEAD", url, {}, function (err, text, xhr) {
+        var off = 0;
+        if (!err && xhr) {
+            var lm = Date.parse(xhr.getResponseHeader("Last-Modified") || "");
+            if (!isNaN(lm)) {
+                var q = 15 * 60000, diff = lm - e.time;
+                var r = Math.round(diff / q) * q;
+                // listing times only have minute resolution: accept only a clean multiple of 15 minutes
+                if (Math.abs(r) <= 14 * 3600000 && Math.abs(diff - r) < 2 * 60000) off = r;
+            }
+        }
+        cb(off);
+    });
+}
+
 // Walk a listing. If it contains version-named sub-directories (7.1.4/, v2.0/ ...), the newest one
 // is entered (up to MAX_DEPTH levels) and its files are the release artifacts.
 function walkListing(ctx, base, html, depth, trail, cb) {
@@ -440,6 +464,7 @@ function walkListing(ctx, base, html, depth, trail, cb) {
         var flat = flatResult(ctx, base, entries);
         if (flat.error) { cb(trail.length ? "No matching files in " + trail[trail.length - 1].name + "/" : flat.error); return; }
         var r = flat.result;
+        var finishWith = function () { cb(null, r); };
         if (trail.length) {
             // release = the version directory we descended into
             var dir = trail[trail.length - 1];
@@ -448,7 +473,11 @@ function walkListing(ctx, base, html, depth, trail, cb) {
             r.time = dir.time || r.time;
             r.typeLabel = r.typeLabel === "Debian (dsc)" ? r.typeLabel : "Directory";
         }
-        cb(null, r);
+        if (!r.time) { finishWith(); return; }
+        listingOffset(ctx, base, entries, function (off) {   // r.id is left alone: it must not depend on this
+            if (off) r.time += off;
+            finishWith();
+        });
         return;
     }
 

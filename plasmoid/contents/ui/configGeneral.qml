@@ -28,6 +28,8 @@ KCM.SimpleKCM {
     property string cfg_githubTokenDefault
     property string cfg_debianArch
     property string cfg_debianArchDefault
+    property int cfg_resetToken
+    property int cfg_resetTokenDefault
 
     property bool syncing: false
 
@@ -151,6 +153,19 @@ KCM.SimpleKCM {
 
     onCfg_urlsJsonChanged: if (!syncing) loadList()
     Component.onCompleted: loadList()
+
+    property bool resetPending: false
+
+    Kirigami.PromptDialog {
+        id: resetDialog
+        title: i18n("Forget release history?")
+        subtitle: i18n("All remembered versions, release times and new/seen markers will be deleted and every URL will be checked again as if it was just added. Your URL list and settings are kept. This takes effect when you press Apply or OK.")
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: {
+            page.cfg_resetToken = page.cfg_resetToken + 1;
+            page.resetPending = true;
+        }
+    }
 
     FolderDialog {
         id: folderDialog
@@ -301,6 +316,27 @@ KCM.SimpleKCM {
                 icon.name: "document-export"
                 enabled: lm.count > 0
                 onClicked: exportDialog.open()
+            }
+        }
+
+        Kirigami.Separator { Layout.fillWidth: true }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing
+
+            QQC2.Button {
+                text: i18n("Forget release history…")
+                icon.name: "edit-clear-history"
+                enabled: !page.resetPending
+                onClicked: resetDialog.open()
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: page.resetPending ? i18n("The history will be cleared when you press Apply or OK.")
+                                        : i18n("Deletes remembered versions, times and new/seen markers.")
             }
         }
 
