@@ -157,6 +157,20 @@ function toName(url) {
 }
 
 // ---------------------------------------------------------------- GitHub
+// The "Source code (tar.gz / zip)" links of a release page. The URL is GitHub's archive link; the
+// saved file is named <repo>-<tag>.<ext> (the name GitHub gives the download), so archives of
+// different repositories or releases never collide.
+function sourceArchives(owner, repo, tag) {
+    if (!tag) return [];
+    var path = tag.split("/").map(encodeURIComponent).join("/");
+    return ["tar.gz", "zip"].map(function (ext) {
+        return {
+            name: repo + "-" + tag + "." + ext,
+            url: "https://github.com/" + owner + "/" + repo + "/archive/refs/tags/" + path + "." + ext
+        };
+    });
+}
+
 function githubAtom(ctx, owner, repo, apiError) {
     var feed = "https://github.com/" + owner + "/" + repo + "/releases.atom";
     request(ctx, "GET", feed, {}, function (err, xml) {
@@ -170,7 +184,8 @@ function githubAtom(ctx, owner, repo, apiError) {
         if (!tag) { ctx.done(apiError); return; }
         ctx.done(null, {
             id: tag, version: tag, time: isNaN(t) ? null : t,
-            link: link[1], typeLabel: "GitHub (feed)", artifacts: []
+            link: link[1], typeLabel: "GitHub (feed)",
+            artifacts: filterArtifacts(sourceArchives(owner, repo, tag), ctx.re)
         });
     });
 }
@@ -205,6 +220,7 @@ function checkGithub(ctx) {
             return { name: a.name, url: a.browser_download_url, size: a.size };
         });
         var t = Date.parse(rel.published_at || rel.created_at);
+        arts = arts.concat(sourceArchives(owner, repo, rel.tag_name));
         ctx.done(null, {
             id: String(rel.id || rel.tag_name),
             version: rel.tag_name || rel.name || String(rel.id),
