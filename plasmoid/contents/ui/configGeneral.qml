@@ -8,6 +8,7 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import org.kde.kirigami as Kirigami
 import org.kde.kcmutils as KCM
+import org.kde.plasma.plasma5support as P5Support
 
 KCM.SimpleKCM {
     id: page
@@ -57,6 +58,95 @@ KCM.SimpleKCM {
         syncing = true;
         cfg_urlsJson = JSON.stringify(arr);
         syncing = false;
+    }
+
+    // ---- export / import (JSON file with name, url and filter of every entry)
+    property string ioMessage: ""
+    property bool ioError: false
+    property int shellSeq: 0
+
+    function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+    function localPath(url) { return decodeURIComponent(url.toString().replace(/^file:\/\//, "")); }
+
+    function exportList(path) {
+        var arr = [];
+        for (var i = 0; i < lm.count; i++) {
+            var e = lm.get(i);
+            arr.push({ name: e.itemName, url: e.itemUrl, filter: e.itemFilter });
+        }
+        var json = JSON.stringify({ format: "release-monitor-urls", version: 1, urls: arr }, null, 2);
+        shell.run("printf '%s\\n' " + shq(json) + " > " + shq(path), function (code, out, err) {
+            ioError = code !== 0;
+            ioMessage = code === 0 ? i18np("Exported %1 URL to %2", "Exported %1 URLs to %2", arr.length, path)
+                                   : i18n("Export failed: %1", err);
+        });
+    }
+
+    // Merge: entries whose URL already exists get the imported name and filter, others are appended
+    function importList(path) {
+        shell.run("cat " + shq(path), function (code, out, err) {
+            if (code !== 0) { ioError = true; ioMessage = i18n("Import failed: %1", err); return; }
+            var data;
+            try { data = JSON.parse(out); } catch (e) { ioError = true; ioMessage = i18n("Import failed: not a valid JSON file"); return; }
+            var list = Array.isArray(data) ? data : (data && Array.isArray(data.urls) ? data.urls : null);
+            if (!list) { ioError = true; ioMessage = i18n("Import failed: no URL list found"); return; }
+            var added = 0, updated = 0;
+            list.forEach(function (x) {
+                if (!x || typeof x.url !== "string" || x.url.trim() === "") return;
+                var url = x.url.trim(), found = -1;
+                for (var i = 0; i < lm.count; i++)
+                    if (lm.get(i).itemUrl.trim() === url) { found = i; break; }
+                var name = typeof x.name === "string" ? x.name : "";
+                var filter = typeof x.filter === "string" ? x.filter : "";
+                if (found >= 0) {
+                    lm.setProperty(found, "itemName", name);
+                    lm.setProperty(found, "itemFilter", filter);
+                    updated++;
+                } else {
+                    lm.append({ itemName: name, itemUrl: url, itemFilter: filter });
+                    added++;
+                }
+            });
+            syncList();
+            ioError = false;
+            ioMessage = i18n("Imported: %1 added, %2 updated", added, updated);
+        });
+    }
+
+    P5Support.DataSource {
+        id: shell
+        engine: "executable"
+        connectedSources: []
+        property var callbacks: ({})
+        onNewData: (sourceName, data) => {
+            if (data["exit code"] === undefined) return;
+            disconnectSource(sourceName);
+            var cb = callbacks[sourceName];
+            delete callbacks[sourceName];
+            if (cb) cb(data["exit code"], data["stdout"] || "", data["stderr"] || "");
+        }
+        function run(cmd, cb) {
+            cmd = cmd + " #" + (++page.shellSeq);
+            callbacks[cmd] = cb;
+            connectSource(cmd);
+        }
+    }
+
+    FileDialog {
+        id: exportDialog
+        title: i18n("Export URLs")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [i18n("JSON files (*.json)")]
+        defaultSuffix: "json"
+        onAccepted: page.exportList(page.localPath(selectedFile))
+    }
+
+    FileDialog {
+        id: importDialog
+        title: i18n("Import URLs")
+        fileMode: FileDialog.OpenFile
+        nameFilters: [i18n("JSON files (*.json)"), i18n("All files (*)")]
+        onAccepted: page.importList(page.localPath(selectedFile))
     }
 
     onCfg_urlsJsonChanged: if (!syncing) loadList()
@@ -190,13 +280,42 @@ KCM.SimpleKCM {
             }
         }
 
-        QQC2.Button {
-            text: i18n("Add URL")
-            icon.name: "list-add"
-            onClicked: {
-                lm.append({ itemName: "", itemUrl: "", itemFilter: "" });
-                page.syncList();
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Button {
+                text: i18n("Add URL")
+                icon.name: "list-add"
+                onClicked: {
+                    lm.append({ itemName: "", itemUrl: "", itemFilter: "" });
+                    page.syncList();
+                }
             }
+            QQC2.Button {
+                text: i18n("Import…")
+                icon.name: "document-import"
+                onClicked: importDialog.open()
+            }
+            QQC2.Button {
+                text: i18n("Export…")
+                icon.name: "document-export"
+                enabled: lm.count > 0
+                onClicked: exportDialog.open()
+            }
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: page.ioMessage !== ""
+            type: page.ioError ? Kirigami.MessageType.Error : Kirigami.MessageType.Positive
+            text: page.ioMessage
+        }
+
+        // the message clears itself (InlineMessage's own close button would break the visible binding)
+        Timer {
+            running: page.ioMessage !== ""
+            interval: 10000
+            onTriggered: page.ioMessage = ""
         }
     }
 }

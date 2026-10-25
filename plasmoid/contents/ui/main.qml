@@ -60,10 +60,38 @@ PlasmoidItem {
             text: i18n("Check all for updates now")
             icon.name: "view-refresh"
             onTriggered: root.checkAll(true)
+        },
+        PlasmaCore.Action {
+            text: i18n("Forget release history and re-check")
+            icon.name: "edit-clear-history"
+            onTriggered: root.resetHistory()
         }
     ]
 
     // ------------------------------------------------------------ helpers
+    // Forget everything learned about releases (versions, times, new/seen flags) and check again
+    function resetHistory() {
+        states = {};
+        persist();
+        rebuildRows();
+        checkAll(true);
+    }
+
+    // QML has no clipboard API: copy through an invisible TextEdit
+    TextEdit {
+        id: clipHelper
+        visible: false
+    }
+
+    function copyLinks(urls) {
+        if (!urls || urls.length === 0) return;
+        clipHelper.text = urls.join("\n");
+        clipHelper.selectAll();
+        clipHelper.copy();
+        notifyDone(i18np("Link copied", "%1 links copied", urls.length),
+                   urls.length === 1 ? urls[0] : i18n("One link per line"), "");
+    }
+
     function esc(s) {
         return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
@@ -170,16 +198,11 @@ PlasmoidItem {
 
             PlasmaExtras.Heading {
                 level: 4
-                text: i18n("New releases")
+                text: i18n("Release Monitor")
             }
 
             PlasmaComponents3.Label {
-                visible: root.rows.length === 0
-                text: i18n("No URLs configured. Right-click the icon and choose “Configure…”.")
-            }
-
-            PlasmaComponents3.Label {
-                visible: root.rows.length > 0 && root.tipRows.length === 0
+                visible: root.tipRows.length === 0
                 text: i18n("No new releases")
             }
 
@@ -715,7 +738,8 @@ PlasmoidItem {
                     delegate: ColumnLayout {
                     id: del
                     required property var modelData
-                    readonly property var st: { root.revision; return root.states[modelData.url] || ({}) }
+                    // a fresh copy per revision: `states` is mutated in place, a same-object assignment would not notify
+                    readonly property var st: { root.revision; return Object.assign({}, root.states[modelData.url] || {}) }
                     readonly property bool isNew: st.fresh === true || st.added === true
                     readonly property var arts: st.artifacts || []
                     readonly property var plainArts: arts.filter(function (a) { return !a.group; })
@@ -838,6 +862,11 @@ PlasmoidItem {
                                      : Kirigami.Theme.textColor
                             }
                             IconButton {
+                                icon.name: "edit-copy"
+                                text: i18n("Copy link")
+                                onClicked: root.copyLinks([artRow.modelData.url])
+                            }
+                            IconButton {
                                 icon.name: "download"
                                 text: artRow.modelData.kind === "dsc" ? i18n("Download (dget: .dsc and its files)") : i18n("Download")
                                 enabled: artRow.dl !== "busy"
@@ -869,6 +898,11 @@ PlasmoidItem {
                             color: buildRow.gs === "failed" ? Kirigami.Theme.negativeTextColor
                                  : buildRow.gs === "done" ? Kirigami.Theme.positiveTextColor
                                  : Kirigami.Theme.textColor
+                        }
+                        IconButton {
+                            icon.name: "edit-copy"
+                            text: i18n("Copy links of all build artifacts")
+                            onClicked: root.copyLinks(del.buildArts.map(function (a) { return a.url; }))
                         }
                         IconButton {
                             icon.name: "download"
