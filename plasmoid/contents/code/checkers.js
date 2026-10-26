@@ -430,6 +430,36 @@ function sortNewestFirst(entries) {
 function isStrictVersion(name) { return /^v?\d+(?:[._-]\d+)*$/.test(name); }
 function isLooseVersion(name) { return /^v?\d/.test(name); }
 
+// First dotted version number inside a name: "tails-amd64-7.14" -> "7.14"
+function versionToken(name) {
+    var m = /\d+(?:\.\d+)+/.exec(name);
+    return m ? m[0] : null;
+}
+
+var PRERELEASE_RE = /alpha|beta|rc\d*|pre|dev|nightly|snapshot|test/i;
+
+// Which sub-directories are release folders? 1) pure versions (7.1.4/, v2.0/);
+// 2) names that carry a version (tails-amd64-7.14/), but only when the listing has no release files of its own,
+// so a plain file listing with extracted source folders is not misread; 3) anything starting with a digit.
+function pickVersionDirs(dirs, entries) {
+    var cands = dirs.filter(function (e) { return isStrictVersion(e.name); });
+    if (cands.length) return cands;
+    var tok = dirs.filter(function (e) { return versionToken(e.name); });
+    var ownFiles = entries.some(function (e) { return !e.isDir && ARTIFACT_RE.test(e.name) && versionToken(e.name); });
+    if (tok.length && !ownFiles) {
+        var stable = tok.filter(function (e) { return !PRERELEASE_RE.test(e.name); });
+        return stable.length ? stable : tok;
+    }
+    return dirs.filter(function (e) { return isLooseVersion(e.name); });
+}
+
+// newest first: compare the version numbers inside the names, then the whole names
+function newerDirFirst(a, b) {
+    var ta = versionToken(a.name), tb = versionToken(b.name);
+    if (ta && tb && ta !== tb) return natCmp(tb, ta);
+    return natCmp(b.name, a.name);
+}
+
 var MAX_DEPTH = 3;
 var MAX_ARTIFACTS = 60;
 
@@ -461,7 +491,12 @@ function flatResult(ctx, base, entries) {
 }
 
 function artifactsOf(base, list) {
-    return list.filter(function (e) { return !e.isDir; }).slice(0, MAX_ARTIFACTS).map(function (e) {
+    // newest first; files with the same time in name order (x.iso before x.iso.sig)
+    var files = list.filter(function (e) { return !e.isDir; }).sort(function (a, b) {
+        if (a.time && b.time && a.time !== b.time) return b.time - a.time;
+        return natCmp(a.name, b.name);
+    });
+    return files.slice(0, MAX_ARTIFACTS).map(function (e) {
         var a = { name: e.name, url: /^[a-z]+:\/\//i.test(e.href) ? e.href : base + e.href, size: e.size };
         if (/\.dsc$/i.test(e.name)) a.kind = "dsc";
         return a;
@@ -497,8 +532,7 @@ function listingOffset(ctx, base, entries, cb) {
 function walkListing(ctx, base, html, depth, trail, cb) {
     var entries = parseListing(html, base);
     var dirs = entries.filter(function (e) { return e.isDir; });
-    var cands = dirs.filter(function (e) { return isStrictVersion(e.name); });
-    if (!cands.length) cands = dirs.filter(function (e) { return isLooseVersion(e.name); });
+    var cands = pickVersionDirs(dirs, entries);
 
     if (!cands.length || depth >= MAX_DEPTH) {
         var flat = flatResult(ctx, base, entries);
@@ -521,7 +555,7 @@ function walkListing(ctx, base, html, depth, trail, cb) {
         return;
     }
 
-    cands.sort(function (a, b) { return natCmp(b.name, a.name); });   // newest first
+    cands.sort(newerDirFirst);
     var tries = cands.slice(0, 3), idx = 0, lastErr = "No release directory found";
 
     function next() {

@@ -13,7 +13,7 @@
         "Id": "com.github.releasemonitor",
         "License": "GPL-3.0+",
         "Name": "Release Monitor",
-        "Version": "0.4.3"
+        "Version": "0.4.4"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
 }
