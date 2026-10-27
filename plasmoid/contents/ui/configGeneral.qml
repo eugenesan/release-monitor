@@ -224,7 +224,7 @@ KCM.SimpleKCM {
             QQC2.ComboBox {
                 Kirigami.FormData.label: i18n("Download with:")
                 readonly property var values: ["auto", "kio", "curl"]
-                model: [i18n("Automatic (KDE KIO if available, else curl)"), i18n("KDE KIO (kioclient6)"), i18n("curl")]
+                model: [i18n("Automatic (KDE KIO if available, else curl)"), i18n("KDE KIO (kioclient6 / kioclient)"), i18n("curl")]
                 currentIndex: Math.max(0, values.indexOf(page.cfg_downloader))
                 onActivated: index => page.cfg_downloader = values[index]
             }

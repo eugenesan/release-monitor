@@ -553,12 +553,15 @@ PlasmoidItem {
         } else {
             var file = dir + "/" + safeName(art.name);
             var part = file + ".part";
-            // KIO (kioclient6, part of kde-cli-tools): KDE proxy settings, native job progress; curl as fallback
-            var kio = "kioclient6 copy --overwrite --noninteractive " + shq(art.url) + " " + shq(part);
+            // KIO (kioclient6 or kioclient, part of kde-cli-tools): KDE proxy settings, native job handling;
+            // curl as fallback (also when KIO fails). The brace group keeps the && chain intact.
+            var find = "K=$(command -v kioclient6 || command -v kioclient)";
+            var kio = "\"$K\" copy --overwrite --noninteractive " + shq(art.url) + " " + shq(part);
             var curl = "curl -fL --retry 3 --connect-timeout 20 -o " + shq(part) + " " + shq(art.url);
             var mode = cfg.downloader || "auto";
-            var fetchCmd = mode === "kio" ? kio : mode === "curl" ? curl
-                : "if command -v kioclient6 >/dev/null 2>&1; then " + kio + "; else " + curl + "; fi";
+            var fetchCmd = mode === "kio" ? "{ " + find + "; [ -n \"$K\" ] && " + kio + "; }"
+                : mode === "curl" ? curl
+                : "{ " + find + "; if [ -n \"$K\" ] && " + kio + "; then :; else " + curl + "; fi; }";
             cmd = "mkdir -p " + shq(dir)
                 + " && " + fetchCmd
                 + " && mv -f " + shq(part) + " " + shq(file)
