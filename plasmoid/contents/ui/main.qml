@@ -553,8 +553,14 @@ PlasmoidItem {
         } else {
             var file = dir + "/" + safeName(art.name);
             var part = file + ".part";
+            // KIO (kioclient6, part of kde-cli-tools): KDE proxy settings, native job progress; curl as fallback
+            var kio = "kioclient6 copy --overwrite --noninteractive " + shq(art.url) + " " + shq(part);
+            var curl = "curl -fL --retry 3 --connect-timeout 20 -o " + shq(part) + " " + shq(art.url);
+            var mode = cfg.downloader || "auto";
+            var fetchCmd = mode === "kio" ? kio : mode === "curl" ? curl
+                : "if command -v kioclient6 >/dev/null 2>&1; then " + kio + "; else " + curl + "; fi";
             cmd = "mkdir -p " + shq(dir)
-                + " && curl -fL --retry 3 --connect-timeout 20 -o " + shq(part) + " " + shq(art.url)
+                + " && " + fetchCmd
                 + " && mv -f " + shq(part) + " " + shq(file)
                 + " || { rm -f " + shq(part) + "; exit 1; }";
         }
@@ -624,7 +630,7 @@ PlasmoidItem {
     // sleeps: one long timer would fire hours late after a resume. A short tick compares with the clock instead.
     Timer {
         id: pollTimer
-        interval: 30000
+        interval: 60000
         repeat: true
         running: true
         onTriggered: root.tick()

@@ -26,6 +26,8 @@ KCM.SimpleKCM {
     property bool cfg_notifyEnabledDefault
     property string cfg_githubToken
     property string cfg_githubTokenDefault
+    property string cfg_downloader
+    property string cfg_downloaderDefault
     property string cfg_debianArch
     property string cfg_debianArchDefault
     property int cfg_resetToken
@@ -217,6 +219,14 @@ KCM.SimpleKCM {
                 text: i18n("Show a desktop notification for new releases")
                 checked: page.cfg_notifyEnabled
                 onToggled: page.cfg_notifyEnabled = checked
+            }
+
+            QQC2.ComboBox {
+                Kirigami.FormData.label: i18n("Download with:")
+                readonly property var values: ["auto", "kio", "curl"]
+                model: [i18n("Automatic (KDE KIO if available, else curl)"), i18n("KDE KIO (kioclient6)"), i18n("curl")]
+                currentIndex: Math.max(0, values.indexOf(page.cfg_downloader))
+                onActivated: index => page.cfg_downloader = values[index]
             }
 
             QQC2.TextField {

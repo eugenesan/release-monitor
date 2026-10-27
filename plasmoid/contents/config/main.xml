@@ -24,6 +24,10 @@
         <entry name="githubToken" type="String">
             <default></default>
         </entry>
+        <!-- auto: kioclient6 when installed, else curl; or force "kio" / "curl" -->
+        <entry name="downloader" type="String">
+            <default>auto</default>
+        </entry>
         <entry name="debianArch" type="String">
             <default>amd64</default>
         </entry>
