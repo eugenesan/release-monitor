@@ -32,7 +32,6 @@ PlasmoidItem {
     property int revision: 0          // bumped whenever `states` changes, delegates re-read their state
     property real now: Date.now()     // ticks while the tooltip is visible
     property real nextCheck: 0        // ms since epoch of the next scheduled check
-    property real retryAt: 0          // ms since epoch: re-check URLs that failed for a temporary reason
     property bool hovered: false
     property int cmdSeq: 0
 
@@ -161,22 +160,39 @@ PlasmoidItem {
         return Qt.formatDateTime(d, sameDay ? "HH:mm" : "yyyy-MM-dd HH:mm") + " (" + when + ")";
     }
 
-    function scheduleNext() {
-        nextCheck = Date.now() + Math.max(1, cfg.intervalMinutes) * 60000;
+    function intervalMs() {
+        return Math.max(1, cfg.intervalMinutes) * 60000;
+    }
+
+    // When is this URL due? Each URL keeps its own last-check time (persisted with the release state), so a
+    // restart of Plasma or the computer does not re-fetch URLs that were checked recently, and the countdown
+    // continues from the time that has already passed. 0 = never checked = due now.
+    // Temporary failures (503, 429, no network) are retried with a growing delay: 3, 6, 12 ... minutes,
+    // never more than the normal interval, so a blocked API is not hammered.
+    function dueAt(it) {
+        var st = states[it.url];
+        if (!st || !st.lastCheck) return 0;
+        var last = Math.min(st.lastCheck, Date.now());          // clock set back: do not wait for the future
+        var iv = intervalMs();
+        if (isTransient(st.error))
+            return last + Math.min(iv, 3 * 60000 * Math.pow(2, Math.max(0, (st.fails || 1) - 1)));
+        return last + iv;
+    }
+
+    function updateNextCheck() {
+        var min = Infinity;
+        items.forEach(function (it) { var d = dueAt(it); if (d < min) min = d; });
+        nextCheck = !isFinite(min) ? 0 : (min === 0 ? Date.now() : min);
+    }
+
+    // Check only the URLs that are due (all of them after a long sleep, none right after a restart)
+    function checkDue() {
+        var t = Date.now();
+        items.forEach(function (it) { if (dueAt(it) <= t) checkOne(it); });
     }
 
     function tick() {
-        var t = Date.now();
-        if (nextCheck > 0 && t >= nextCheck) {
-            scheduleNext();
-            retryAt = 0;
-            checkAll(false);
-        } else if (retryAt > 0 && t >= retryAt) {
-            retryAt = 0;
-            items.forEach(function (it) {
-                if (isTransient((states[it.url] || {}).error)) checkOne(it);
-            });
-        }
+        if (nextCheck > 0 && Date.now() >= nextCheck) checkDue();
     }
 
     // Errors that are likely to go away on their own (no network right after a resume, server hiccup)
@@ -329,6 +345,7 @@ PlasmoidItem {
         lastCheckAll = lc;
         rows = r;
         revision++;
+        updateNextCheck();
     }
 
     function persist() {
@@ -384,9 +401,10 @@ PlasmoidItem {
         try {
             if (err || !res) {
                 st.error = err || i18n("Empty result");
-                if (isTransient(st.error)) retryAt = Date.now() + 3 * 60000;
+                st.fails = isTransient(st.error) ? (st.fails || 0) + 1 : 0;
             } else {
                 st.error = "";
+                st.fails = 0;
                 var hadPrevious = !!st.id;
                 if (!hadPrevious) st.added = true;          // first result for this URL: "just added"
                 if (st.id !== res.id) {
@@ -652,23 +670,22 @@ PlasmoidItem {
         id: startupTimer
         interval: 3000
         running: true
-        onTriggered: root.checkAll(false)
+        onTriggered: root.checkDue()
     }
 
     Connections {
         target: Plasmoid.configuration
         function onResetTokenChanged() { root.resetHistory(); }
-        function onIntervalMinutesChanged() { root.scheduleNext(); }
+        function onIntervalMinutesChanged() { root.updateNextCheck(); }
         function onUrlsJsonChanged() {
             root.loadItems();
-            Qt.callLater(function () { root.checkAll(false); });
+            Qt.callLater(function () { root.checkDue(); });
         }
     }
 
     Component.onCompleted: {
         try { states = JSON.parse(cfg.stateJson || "{}"); } catch (e) { states = {}; }
         loadItems();
-        scheduleNext();
     }
 
     // ------------------------------------------------------------ small reusable button
