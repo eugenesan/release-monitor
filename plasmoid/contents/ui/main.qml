@@ -32,6 +32,7 @@ PlasmoidItem {
     property int revision: 0          // bumped whenever `states` changes, delegates re-read their state
     property real now: Date.now()     // ticks while the tooltip is visible
     property real nextCheck: 0        // ms since epoch of the next scheduled check
+    property real retryAt: 0          // ms since epoch: re-check URLs that failed for a temporary reason
     property bool hovered: false
     property int cmdSeq: 0
 
@@ -156,7 +157,31 @@ PlasmoidItem {
         if (nextCheck <= 0) return "—";
         var d = new Date(nextCheck);
         var sameDay = d.toDateString() === new Date(now).toDateString();
-        return Qt.formatDateTime(d, sameDay ? "HH:mm" : "yyyy-MM-dd HH:mm") + " (" + i18n("in %1", fmtIn(nextCheck - now)) + ")";
+        var when = nextCheck - now <= 0 ? i18n("due now") : i18n("in %1", fmtIn(nextCheck - now));
+        return Qt.formatDateTime(d, sameDay ? "HH:mm" : "yyyy-MM-dd HH:mm") + " (" + when + ")";
+    }
+
+    function scheduleNext() {
+        nextCheck = Date.now() + Math.max(1, cfg.intervalMinutes) * 60000;
+    }
+
+    function tick() {
+        var t = Date.now();
+        if (nextCheck > 0 && t >= nextCheck) {
+            scheduleNext();
+            retryAt = 0;
+            checkAll(false);
+        } else if (retryAt > 0 && t >= retryAt) {
+            retryAt = 0;
+            items.forEach(function (it) {
+                if (isTransient((states[it.url] || {}).error)) checkOne(it);
+            });
+        }
+    }
+
+    // Errors that are likely to go away on their own (no network right after a resume, server hiccup)
+    function isTransient(err) {
+        return !!err && /^(Network error|Timed out|HTTP (5\d\d|429))/.test(err);
     }
 
     function tooltipCells(list) {
@@ -283,7 +308,8 @@ PlasmoidItem {
                        return {
                            name: (x.name && String(x.name).trim()) ? String(x.name).trim() : Checkers.defaultName(url),
                            url: url,
-                           filter: x.filter || ""
+                           filter: x.filter || "",
+                           prerelease: x.prerelease === true
                        };
                    });
         rebuildRows();
@@ -358,6 +384,7 @@ PlasmoidItem {
         try {
             if (err || !res) {
                 st.error = err || i18n("Empty result");
+                if (isTransient(st.error)) retryAt = Date.now() + 3 * 60000;
             } else {
                 st.error = "";
                 var hadPrevious = !!st.id;
@@ -593,16 +620,14 @@ PlasmoidItem {
     }
 
     // ------------------------------------------------------------ scheduling
+    // Wall-clock scheduler. A QML Timer counts monotonic time, which does not advance while the computer
+    // sleeps: one long timer would fire hours late after a resume. A short tick compares with the clock instead.
     Timer {
         id: pollTimer
-        interval: Math.max(1, root.cfg.intervalMinutes) * 60 * 1000
+        interval: 30000
         repeat: true
         running: true
-        onIntervalChanged: root.nextCheck = Date.now() + interval     // changing the interval restarts the timer
-        onTriggered: {
-            root.nextCheck = Date.now() + interval;
-            root.checkAll(false);
-        }
+        onTriggered: root.tick()
     }
 
     // keeps "in N min" in the tooltip current, only while it can be seen
@@ -624,6 +649,7 @@ PlasmoidItem {
     Connections {
         target: Plasmoid.configuration
         function onResetTokenChanged() { root.resetHistory(); }
+        function onIntervalMinutesChanged() { root.scheduleNext(); }
         function onUrlsJsonChanged() {
             root.loadItems();
             Qt.callLater(function () { root.checkAll(false); });
@@ -633,7 +659,7 @@ PlasmoidItem {
     Component.onCompleted: {
         try { states = JSON.parse(cfg.stateJson || "{}"); } catch (e) { states = {}; }
         loadItems();
-        nextCheck = Date.now() + pollTimer.interval;
+        scheduleNext();
     }
 
     // ------------------------------------------------------------ small reusable button

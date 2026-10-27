@@ -40,7 +40,7 @@ KCM.SimpleKCM {
         var arr = [];
         try { arr = JSON.parse(cfg_urlsJson || "[]"); } catch (e) { arr = []; }
         arr.forEach(function (x) {
-            lm.append({ itemName: x.name || "", itemUrl: x.url || "", itemFilter: x.filter || "" });
+            lm.append({ itemName: x.name || "", itemUrl: x.url || "", itemFilter: x.filter || "", itemPre: x.prerelease === true });
         });
     }
 
@@ -55,7 +55,7 @@ KCM.SimpleKCM {
         var arr = [];
         for (var i = 0; i < lm.count; i++) {
             var e = lm.get(i);
-            arr.push({ name: e.itemName, url: e.itemUrl, filter: e.itemFilter });
+            arr.push({ name: e.itemName, url: e.itemUrl, filter: e.itemFilter, prerelease: e.itemPre });
         }
         syncing = true;
         cfg_urlsJson = JSON.stringify(arr);
@@ -74,7 +74,7 @@ KCM.SimpleKCM {
         var arr = [];
         for (var i = 0; i < lm.count; i++) {
             var e = lm.get(i);
-            arr.push({ name: e.itemName, url: e.itemUrl, filter: e.itemFilter });
+            arr.push({ name: e.itemName, url: e.itemUrl, filter: e.itemFilter, prerelease: e.itemPre });
         }
         var json = JSON.stringify({ format: "release-monitor-urls", version: 1, urls: arr }, null, 2);
         shell.run("printf '%s\\n' " + shq(json) + " > " + shq(path), function (code, out, err) {
@@ -100,12 +100,14 @@ KCM.SimpleKCM {
                     if (lm.get(i).itemUrl.trim() === url) { found = i; break; }
                 var name = typeof x.name === "string" ? x.name : "";
                 var filter = typeof x.filter === "string" ? x.filter : "";
+                var pre = x.prerelease === true;
                 if (found >= 0) {
                     lm.setProperty(found, "itemName", name);
                     lm.setProperty(found, "itemFilter", filter);
+                    lm.setProperty(found, "itemPre", pre);
                     updated++;
                 } else {
-                    lm.append({ itemName: name, itemUrl: url, itemFilter: filter });
+                    lm.append({ itemName: name, itemUrl: url, itemFilter: filter, itemPre: pre });
                     added++;
                 }
             });
@@ -254,6 +256,7 @@ KCM.SimpleKCM {
                 required property string itemName
                 required property string itemUrl
                 required property string itemFilter
+                required property bool itemPre
 
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
@@ -285,11 +288,23 @@ KCM.SimpleKCM {
                         onClicked: page.removeAt(entry.index)
                     }
                 }
-                QQC2.TextField {
+                RowLayout {
                     Layout.fillWidth: true
-                    placeholderText: i18n("Filter (regular expression, optional)")
-                    text: entry.itemFilter
-                    onTextEdited: { lm.setProperty(entry.index, "itemFilter", text); page.syncList(); }
+                    spacing: Kirigami.Units.smallSpacing
+
+                    QQC2.TextField {
+                        Layout.fillWidth: true
+                        placeholderText: i18n("Filter (regular expression, optional)")
+                        text: entry.itemFilter
+                        onTextEdited: { lm.setProperty(entry.index, "itemFilter", text); page.syncList(); }
+                    }
+                    QQC2.CheckBox {
+                        text: i18n("Pre-releases")
+                        checked: entry.itemPre
+                        onToggled: { lm.setProperty(entry.index, "itemPre", checked); page.syncList(); }
+                        QQC2.ToolTip.text: i18n("Also follow beta / pre-release versions (GitHub pre-releases, F-Droid versions that are not the suggested one, beta/rc release folders)")
+                        QQC2.ToolTip.visible: hovered
+                    }
                 }
                 Kirigami.Separator { Layout.fillWidth: true }
             }
@@ -302,7 +317,7 @@ KCM.SimpleKCM {
                 text: i18n("Add URL")
                 icon.name: "list-add"
                 onClicked: {
-                    lm.append({ itemName: "", itemUrl: "", itemFilter: "" });
+                    lm.append({ itemName: "", itemUrl: "", itemFilter: "", itemPre: false });
                     page.syncList();
                 }
             }

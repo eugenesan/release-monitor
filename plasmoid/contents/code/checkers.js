@@ -215,7 +215,9 @@ function checkGithub(ctx) {
         }
         list = list.filter(function (r) { return r && !r.draft; });
         if (!list.length) { ctx.done("No releases found"); return; }
-        var rel = list.filter(function (r) { return !r.prerelease; })[0] || list[0];
+        // newest release; pre-releases only when asked for (or when there is nothing else)
+        var rel = item.prerelease ? list[0]
+                                  : (list.filter(function (r) { return !r.prerelease; })[0] || list[0]);
         var arts = (rel.assets || []).filter(function (a) { return a && a.browser_download_url; }).map(function (a) {
             return { name: a.name, url: a.browser_download_url, size: a.size };
         });
@@ -242,7 +244,12 @@ function checkFdroid(ctx) {
         try { j = JSON.parse(text); } catch (e) { ctx.done("Bad JSON from F-Droid API"); return; }
         var list = j.packages || [];
         if (!list.length) { ctx.done("No versions found"); return; }
+        // F-Droid recommends one version ("suggested"); newer ones are betas / other channels.
+        // With "pre-releases" the highest version code wins.
         var cur = list.filter(function (p) { return p.versionCode === j.suggestedVersionCode; })[0] || list[0];
+        if (item.prerelease) {
+            cur = list.slice().sort(function (a, b) { return b.versionCode - a.versionCode; })[0];
+        }
         var vc = String(cur.versionCode);
         var base = "https://f-droid.org/repo/" + pkg + "_" + vc;
         var apk = { name: pkg + "_" + vc + ".apk", url: base + ".apk" };
@@ -441,14 +448,18 @@ var PRERELEASE_RE = /alpha|beta|rc\d*|pre|dev|nightly|snapshot|test/i;
 // Which sub-directories are release folders? 1) pure versions (7.1.4/, v2.0/);
 // 2) names that carry a version (tails-amd64-7.14/), but only when the listing has no release files of its own,
 // so a plain file listing with extracted source folders is not misread; 3) anything starting with a digit.
-function pickVersionDirs(dirs, entries) {
+function pickVersionDirs(dirs, entries, includePre) {
     var cands = dirs.filter(function (e) { return isStrictVersion(e.name); });
+    if (includePre)   // 7.2.0_BETA1/, 2.0-rc1/ ...
+        cands = cands.concat(dirs.filter(function (e) {
+            return !isStrictVersion(e.name) && versionToken(e.name) && PRERELEASE_RE.test(e.name);
+        }));
     if (cands.length) return cands;
     var tok = dirs.filter(function (e) { return versionToken(e.name); });
     var ownFiles = entries.some(function (e) { return !e.isDir && ARTIFACT_RE.test(e.name) && versionToken(e.name); });
     if (tok.length && !ownFiles) {
         var stable = tok.filter(function (e) { return !PRERELEASE_RE.test(e.name); });
-        return stable.length ? stable : tok;
+        return (stable.length && !includePre) ? stable : tok;
     }
     return dirs.filter(function (e) { return isLooseVersion(e.name); });
 }
@@ -457,6 +468,8 @@ function pickVersionDirs(dirs, entries) {
 function newerDirFirst(a, b) {
     var ta = versionToken(a.name), tb = versionToken(b.name);
     if (ta && tb && ta !== tb) return natCmp(tb, ta);
+    var pa = PRERELEASE_RE.test(a.name), pb = PRERELEASE_RE.test(b.name);
+    if (pa !== pb) return pa ? 1 : -1;          // same number: the final release beats 7.2.0_BETA1
     return natCmp(b.name, a.name);
 }
 
@@ -532,7 +545,7 @@ function listingOffset(ctx, base, entries, cb) {
 function walkListing(ctx, base, html, depth, trail, cb) {
     var entries = parseListing(html, base);
     var dirs = entries.filter(function (e) { return e.isDir; });
-    var cands = pickVersionDirs(dirs, entries);
+    var cands = pickVersionDirs(dirs, entries, !!ctx.item.prerelease);
 
     if (!cands.length || depth >= MAX_DEPTH) {
         var flat = flatResult(ctx, base, entries);
