@@ -219,7 +219,7 @@ function checkGithub(ctx) {
         var rel = item.prerelease ? list[0]
                                   : (list.filter(function (r) { return !r.prerelease; })[0] || list[0]);
         var arts = (rel.assets || []).filter(function (a) { return a && a.browser_download_url; }).map(function (a) {
-            return { name: a.name, url: a.browser_download_url, size: a.size };
+            return { name: a.name, url: a.browser_download_url, size: a.size, exact: true };
         });
         var t = Date.parse(rel.published_at || rel.created_at);
         arts = arts.concat(sourceArchives(owner, repo, rel.tag_name));

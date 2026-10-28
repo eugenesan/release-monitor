@@ -23,7 +23,11 @@ PlasmoidItem {
     property var items: []          // [{name, url, filter}]
     property var states: ({})       // url -> {id, version, time, timeIsSeen, lastCheck, error, fresh, link, artifacts}
     property var busy: ({})         // url -> bool (request in flight)
-    property var dlStatus: ({})     // "url|artifact" -> "busy" | "done" | "failed"
+    property var dlStatus: ({})     // "url|artifact" -> "busy" | "done" | "failed" | "cancelled"
+    property var dlProgress: ({})   // "url|artifact" -> {got, total} bytes (total 0 = unknown)
+    property var dlMeta: ({})       // "url|artifact" -> {part, pidf, total, cancelled} of running downloads
+    property int activeDownloads: 0
+    property bool polling: false
     property var rows: []           // derived: [{name, url, filter, type, st}]
     property int checkingCount: 0
     property int freshCount: 0        // unseen new releases (panel badge)
@@ -42,7 +46,7 @@ PlasmoidItem {
     // ------------------------------------------------------------ plasmoid properties
     Plasmoid.icon: newCount > 0 ? "update-high" : "update-none"
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
-    Plasmoid.busy: checkingCount > 0
+    Plasmoid.busy: checkingCount > 0 || activeDownloads > 0
 
     // A custom tooltip item (instead of rich-text sub text) gives a real bordered table and
     // does not leave a rich-text format behind in the shared tooltip of other plasmoids.
@@ -309,6 +313,11 @@ PlasmoidItem {
             }
 
             PlasmaComponents3.Label {
+                visible: root.activeDownloads > 0
+                text: i18np("Downloading %1 file", "Downloading %1 files", root.activeDownloads)
+            }
+
+            PlasmaComponents3.Label {
                 text: i18n("Next update: %1", root.nextCheckText())
             }
         }
@@ -535,7 +544,7 @@ PlasmoidItem {
             disconnectSource(sourceName);
             var cb = callbacks[sourceName];
             delete callbacks[sourceName];
-            if (cb) cb(data["exit code"], data["stderr"] || "");
+            if (cb) cb(data["exit code"], data["stderr"] || "", data["stdout"] || "");
         }
 
         function run(cmd, cb) {
@@ -549,13 +558,18 @@ PlasmoidItem {
         var o = Object.assign({}, dlStatus);
         o[key] = value;
         dlStatus = o;
+        activeDownloads = Object.keys(o).filter(function (k) { return o[k] === "busy"; }).length;
+        if (value !== "busy" && dlProgress[key]) {
+            var p = Object.assign({}, dlProgress);
+            delete p[key];
+            dlProgress = p;
+        }
     }
 
     function downloadArtifact(item, art, cb) {
         var key = item.url + "|" + art.name;
-        setDl(key, "busy");
         var dir = targetDir(item);
-        var cmd;
+        var chain, part = "";
         if (art.kind === "dsc") {
             // Equivalent of `dget URL.dsc`: fetches the .dsc and every file it lists.
             // -u skips signature verification (so a missing keyring does not fail the download).
@@ -563,14 +577,14 @@ PlasmoidItem {
             var slash = art.url.lastIndexOf("/");
             var baseUrl = art.url.substring(0, slash + 1);
             var fn = art.url.substring(slash + 1);
-            cmd = "mkdir -p " + shq(dir) + " && cd " + shq(dir)
+            chain = "mkdir -p " + shq(dir) + " && cd " + shq(dir)
                 + " && if command -v dget >/dev/null 2>&1; then dget -u " + shq(art.url) + "; else"
                 + " curl -fL --retry 3 -O " + shq(art.url)
                 + " && awk '/^Files:/{f=1;next} /^[^ ]/{f=0} f&&NF==3{print $3}' " + shq(fn)
                 + " | while read -r f; do curl -fL --retry 3 -O " + shq(baseUrl) + "\"$f\" || exit 1; done; fi";
         } else {
             var file = dir + "/" + safeName(art.name);
-            var part = file + ".part";
+            part = file + ".part";
             // KIO (kioclient6 or kioclient, part of kde-cli-tools): KDE proxy settings, native job handling;
             // curl as fallback (also when KIO fails). The brace group keeps the && chain intact.
             var find = "K=$(command -v kioclient6 || command -v kioclient)";
@@ -580,22 +594,111 @@ PlasmoidItem {
             var fetchCmd = mode === "kio" ? "{ " + find + "; [ -n \"$K\" ] && " + kio + "; }"
                 : mode === "curl" ? curl
                 : "{ " + find + "; if [ -n \"$K\" ] && " + kio + "; then :; else " + curl + "; fi; }";
-            cmd = "mkdir -p " + shq(dir)
+            chain = "mkdir -p " + shq(dir)
                 + " && " + fetchCmd
                 + " && mv -f " + shq(part) + " " + shq(file)
                 + " || { rm -f " + shq(part) + "; exit 1; }";
         }
-        executor.run(cmd, function (code, err) {
-            var ok = (code === 0);
-            setDl(key, ok ? "done" : "failed");
-            if (cb) cb(ok, dir);
+
+        // Run the download in its own process group (setsid) and remember the group leader's pid,
+        // so that it can be cancelled together with every helper it started.
+        var pidf = "/tmp/release-monitor-" + Date.now().toString(36) + "-" + (++cmdSeq) + ".pid";
+        var script = "echo $$ > " + shq(pidf) + "; ( " + chain + " ); rc=$?; rm -f " + shq(pidf) + "; exit $rc";
+        var cmd = "if command -v setsid >/dev/null 2>&1; then setsid -w sh -c " + shq(script)
+                + "; else sh -c " + shq(script) + "; fi";
+
+        var meta = { part: part, pidf: pidf, total: (art.exact && art.size) ? art.size : 0, cancelled: false };
+        dlMeta[key] = meta;
+        setDl(key, "busy");
+        if (part && !meta.total) {
+            headLength(art.url, function (len) { if (len > 0) meta.total = len; });
+        }
+
+        executor.run(cmd, function (code) {
+            var wasCancelled = meta.cancelled;
+            delete dlMeta[key];
+            var ok = (code === 0) && !wasCancelled;
+            setDl(key, wasCancelled ? "cancelled" : (ok ? "done" : "failed"));
+            if (cb) cb(ok, dir, wasCancelled);
+        });
+    }
+
+    // size of a file from its Content-Length (for the progress bar); 0 when the server does not tell
+    function headLength(url, cb) {
+        try {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                var n = xhr.status === 200 ? parseInt(xhr.getResponseHeader("Content-Length"), 10) : 0;
+                cb(n > 0 ? n : 0);
+            };
+            xhr.open("HEAD", url);
+            xhr.send();
+        } catch (e) {
+            cb(0);
+        }
+    }
+
+    // One shell call per second reads the size of every running download's partial file
+    // (KIO writes <name>.part.part while it copies, so both names are looked at).
+    function pollProgress() {
+        if (polling) return;
+        var keys = Object.keys(dlMeta).filter(function (k) { return dlMeta[k].part && dlStatus[k] === "busy"; });
+        if (!keys.length) return;
+        polling = true;
+        var cmd = keys.map(function (k, i) {
+            var p = dlMeta[k].part;
+            return "echo \"" + i + " $(stat -c %s " + shq(p) + " " + shq(p + ".part") + " 2>/dev/null | sort -n | tail -n 1)\"";
+        }).join("; ");
+        executor.run(cmd, function (code, err, out) {
+            polling = false;
+            var o = Object.assign({}, dlProgress);
+            out.split("\n").forEach(function (line) {
+                var m = /^(\d+)\s+(\d+)/.exec(line);
+                if (!m) return;
+                var key = keys[parseInt(m[1], 10)];
+                if (key && dlMeta[key] && dlStatus[key] === "busy") o[key] = { got: parseInt(m[2], 10), total: dlMeta[key].total };
+            });
+            dlProgress = o;
+        });
+    }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.activeDownloads > 0
+        onTriggered: root.pollProgress()
+    }
+
+    function cancelKey(key) {
+        var meta = dlMeta[key];
+        if (!meta || meta.cancelled) return;
+        meta.cancelled = true;
+        // wait briefly for the pid file (download just started), stop the whole process group, remove leftovers
+        var cmd = "for i in 1 2 3 4 5; do [ -s " + shq(meta.pidf) + " ] && break; sleep 0.3; done; "
+                + "P=$(cat " + shq(meta.pidf) + " 2>/dev/null); "
+                + "if [ -n \"$P\" ]; then kill -s TERM -- -\"$P\" 2>/dev/null || kill -s TERM \"$P\" 2>/dev/null; "
+                + "sleep 1; kill -s KILL -- -\"$P\" 2>/dev/null; fi; "
+                + "rm -f " + shq(meta.pidf) + (meta.part ? " " + shq(meta.part) + " " + shq(meta.part + ".part") : "");
+        executor.run(cmd, function () {});
+    }
+
+    function cancelDownload(url, art) {
+        cancelKey(url + "|" + art.name);
+    }
+
+    function cancelGroup(url, group) {
+        var st = states[url];
+        ((st && st.artifacts) ? st.artifacts : []).forEach(function (a) {
+            if (!group || a.group === group) cancelKey(url + "|" + a.name);
         });
     }
 
     function downloadOne(url, art) {
         var item = findItem(url);
         if (!item) return;
-        downloadArtifact(item, art, function (ok, dir) {
+        downloadArtifact(item, art, function (ok, dir, cancelled) {
+            if (cancelled) return;
             if (ok) notifyDone(i18n("Download finished"), art.name, dir);
             else notifyDone(i18n("Download failed"), art.name, "");
         });
@@ -607,12 +710,13 @@ PlasmoidItem {
                        item ? i18n("%1 has no downloadable artifacts (check the filter).", item.name) : "", "");
             return;
         }
-        var total = arts.length, finished = 0, okCount = 0, dirOut = "";
+        var total = arts.length, finished = 0, okCount = 0, cancelCount = 0, dirOut = "";
         arts.forEach(function (a) {
-            downloadArtifact(item, a, function (ok, dir) {
+            downloadArtifact(item, a, function (ok, dir, cancelled) {
                 finished++;
                 if (ok) { okCount++; dirOut = dir; }
-                if (finished === total) {
+                if (cancelled) cancelCount++;
+                if (finished === total && cancelCount < total) {
                     notifyDone(okCount === total ? i18n("Download finished") : i18n("Download completed with errors"),
                                i18n("%1: %2 of %3 files downloaded.", item.name, okCount, total),
                                okCount > 0 ? dirOut : "");
@@ -633,15 +737,17 @@ PlasmoidItem {
 
     // aggregate download status of several artifacts: "" | "busy" | "done" | "failed"
     function groupStatus(url, arts) {
-        var busyN = 0, doneN = 0, failedN = 0;
+        var busyN = 0, doneN = 0, failedN = 0, cancelledN = 0;
         arts.forEach(function (a) {
             var v = dlStatus[url + "|" + a.name];
-            if (v === "busy") busyN++;
+            if (v === "cancelled") cancelledN++;
+            else if (v === "busy") busyN++;
             else if (v === "done") doneN++;
             else if (v === "failed") failedN++;
         });
         if (busyN) return "busy";
         if (failedN) return "failed";
+        if (cancelledN) return "cancelled";
         if (doneN === arts.length && doneN > 0) return "done";
         return "";
     }
@@ -818,6 +924,10 @@ PlasmoidItem {
                     readonly property var arts: st.artifacts || []
                     readonly property var plainArts: arts.filter(function (a) { return !a.group; })
                     readonly property var buildArts: arts.filter(function (a) { return a.group === "build"; })
+                    readonly property int busyCount: {
+                        root.dlStatus;
+                        return arts.filter(function (a) { return root.dlStatus[modelData.url + "|" + a.name] === "busy"; }).length;
+                    }
 
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
@@ -868,10 +978,10 @@ PlasmoidItem {
                             onClicked: Qt.openUrlExternally(del.st.link || del.modelData.url)
                         }
                         IconButton {
-                            icon.name: "download"
-                            text: i18n("Download all artifacts")
+                            icon.name: del.busyCount > 0 ? "process-stop" : "download"
+                            text: del.busyCount > 0 ? i18n("Cancel downloads") : i18n("Download all artifacts")
                             enabled: del.arts.length > 0
-                            onClicked: root.downloadAll(del.modelData.url)
+                            onClicked: del.busyCount > 0 ? root.cancelGroup(del.modelData.url, "") : root.downloadAll(del.modelData.url)
                         }
                         IconButton {
                             icon.name: "view-refresh"
@@ -910,6 +1020,8 @@ PlasmoidItem {
                             id: artRow
                             required property var modelData
                             readonly property string dl: root.dlStatus[del.modelData.url + "|" + modelData.name] || ""
+                            readonly property var prog: root.dlProgress[del.modelData.url + "|" + modelData.name]
+                            readonly property bool known: !!prog && prog.total > 0
                             Layout.fillWidth: true
                             Layout.leftMargin: Kirigami.Units.largeSpacing
 
@@ -923,10 +1035,23 @@ PlasmoidItem {
                                 text: root.fmtSize(artRow.modelData.size)
                                 opacity: 0.6
                             }
+                            PlasmaComponents3.ProgressBar {
+                                visible: artRow.dl === "busy"
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                                from: 0
+                                to: 1
+                                indeterminate: !artRow.known
+                                value: artRow.known ? Math.min(0.99, artRow.prog.got / artRow.prog.total) : 0
+                            }
                             PlasmaComponents3.Label {
-                                visible: artRow.dl !== ""
-                                text: artRow.dl === "busy" ? i18n("Downloading…")
-                                    : artRow.dl === "done" ? "✓" : i18n("Failed")
+                                visible: artRow.dl === "busy"
+                                text: artRow.known ? Math.round(Math.min(0.99, artRow.prog.got / artRow.prog.total) * 100) + " %"
+                                    : (artRow.prog && artRow.prog.got > 0 ? root.fmtSize(artRow.prog.got) : "…")
+                                opacity: 0.8
+                            }
+                            PlasmaComponents3.Label {
+                                visible: artRow.dl !== "" && artRow.dl !== "busy"
+                                text: artRow.dl === "done" ? "✓" : artRow.dl === "cancelled" ? i18n("Cancelled") : i18n("Failed")
                                 color: artRow.dl === "failed" ? Kirigami.Theme.negativeTextColor
                                      : artRow.dl === "done" ? Kirigami.Theme.positiveTextColor
                                      : Kirigami.Theme.textColor
@@ -937,10 +1062,11 @@ PlasmoidItem {
                                 onClicked: root.copyLinks([artRow.modelData.url])
                             }
                             IconButton {
-                                icon.name: "download"
-                                text: artRow.modelData.kind === "dsc" ? i18n("Download (dget: .dsc and its files)") : i18n("Download")
-                                enabled: artRow.dl !== "busy"
-                                onClicked: root.downloadOne(del.modelData.url, artRow.modelData)
+                                icon.name: artRow.dl === "busy" ? "process-stop" : "download"
+                                text: artRow.dl === "busy" ? i18n("Cancel download")
+                                    : artRow.modelData.kind === "dsc" ? i18n("Download (dget: .dsc and its files)") : i18n("Download")
+                                onClicked: artRow.dl === "busy" ? root.cancelDownload(del.modelData.url, artRow.modelData)
+                                                                : root.downloadOne(del.modelData.url, artRow.modelData)
                             }
                         }
                     }
@@ -961,10 +1087,15 @@ PlasmoidItem {
                             QQC2.ToolTip.visible: buildHover.hovered
                             QQC2.ToolTip.text: del.buildArts.map(function (a) { return a.name; }).join("\n")
                         }
+                        PlasmaComponents3.ProgressBar {
+                            visible: buildRow.gs === "busy"
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                            indeterminate: true
+                        }
                         PlasmaComponents3.Label {
                             visible: buildRow.gs !== ""
                             text: buildRow.gs === "busy" ? i18n("Downloading…")
-                                : buildRow.gs === "done" ? "✓" : i18n("Failed")
+                                : buildRow.gs === "done" ? "✓" : buildRow.gs === "cancelled" ? i18n("Cancelled") : i18n("Failed")
                             color: buildRow.gs === "failed" ? Kirigami.Theme.negativeTextColor
                                  : buildRow.gs === "done" ? Kirigami.Theme.positiveTextColor
                                  : Kirigami.Theme.textColor
@@ -975,10 +1106,11 @@ PlasmoidItem {
                             onClicked: root.copyLinks(del.buildArts.map(function (a) { return a.url; }))
                         }
                         IconButton {
-                            icon.name: "download"
-                            text: i18n("Download build artifacts (source, build log, signature)")
-                            enabled: buildRow.gs !== "busy"
-                            onClicked: root.downloadGroup(del.modelData.url, "build")
+                            icon.name: buildRow.gs === "busy" ? "process-stop" : "download"
+                            text: buildRow.gs === "busy" ? i18n("Cancel download")
+                                : i18n("Download build artifacts (source, build log, signature)")
+                            onClicked: buildRow.gs === "busy" ? root.cancelGroup(del.modelData.url, "build")
+                                                              : root.downloadGroup(del.modelData.url, "build")
                         }
                     }
 
