@@ -44,7 +44,7 @@ PlasmoidItem {
                                            .toString().replace(/^file:\/\//, "")
 
     // ------------------------------------------------------------ plasmoid properties
-    Plasmoid.icon: newCount > 0 ? "update-high" : "update-none"
+    Plasmoid.icon: newCount > 0 ? "software-updates-updates" : "software-updates"
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     Plasmoid.busy: checkingCount > 0 || activeDownloads > 0
 
@@ -816,8 +816,8 @@ PlasmoidItem {
 
         Kirigami.Icon {
             anchors.fill: parent
-            source: root.newCount > 0 ? "update-high" : "update-none"
-            fallback: root.newCount > 0 ? "software-update-available" : "system-software-update"
+            source: root.newCount > 0 ? "software-updates-updates" : "software-updates"
+            fallback: root.newCount > 0 ? "update-high" : "update-none"
             active: compactRoot.containsMouse
         }
 
