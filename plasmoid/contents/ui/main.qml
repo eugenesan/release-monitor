@@ -1016,14 +1016,25 @@ PlasmoidItem {
 
                     Repeater {
                         model: del.plainArts
-                        delegate: RowLayout {
+                        delegate: Rectangle {
                             id: artRow
+                            required property int index
                             required property var modelData
                             readonly property string dl: root.dlStatus[del.modelData.url + "|" + modelData.name] || ""
                             readonly property var prog: root.dlProgress[del.modelData.url + "|" + modelData.name]
                             readonly property bool known: !!prog && prog.total > 0
                             Layout.fillWidth: true
-                            Layout.leftMargin: Kirigami.Units.largeSpacing
+                            implicitHeight: artLine.implicitHeight + Kirigami.Units.smallSpacing
+
+                            // alternating shade: faint, just enough to follow a line from the name to its buttons
+                            color: index % 2 === 1 ? Qt.alpha(Kirigami.Theme.textColor, 0.06) : "transparent"
+                            radius: Kirigami.Units.smallSpacing / 2
+
+                            RowLayout {
+                                id: artLine
+                                anchors.fill: parent
+                                anchors.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                                anchors.rightMargin: Kirigami.Units.smallSpacing
 
                             PlasmaComponents3.Label {
                                 text: artRow.modelData.name
@@ -1068,16 +1079,26 @@ PlasmoidItem {
                                 onClicked: artRow.dl === "busy" ? root.cancelDownload(del.modelData.url, artRow.modelData)
                                                                 : root.downloadOne(del.modelData.url, artRow.modelData)
                             }
+                            }
                         }
                     }
 
                     // F-Droid: source tarball, build log and signature as one download
-                    RowLayout {
+                    Rectangle {
                         id: buildRow
                         visible: del.buildArts.length > 0
                         readonly property string gs: root.groupStatus(del.modelData.url, del.buildArts)
                         Layout.fillWidth: true
-                        Layout.leftMargin: Kirigami.Units.largeSpacing
+                        implicitHeight: buildLine.implicitHeight + Kirigami.Units.smallSpacing
+                        // continues the alternation of the file rows above
+                        color: del.plainArts.length % 2 === 1 ? Qt.alpha(Kirigami.Theme.textColor, 0.06) : "transparent"
+                        radius: Kirigami.Units.smallSpacing / 2
+
+                        RowLayout {
+                            id: buildLine
+                            anchors.fill: parent
+                            anchors.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                            anchors.rightMargin: Kirigami.Units.smallSpacing
 
                         PlasmaComponents3.Label {
                             text: i18np("Build artifacts (%1 file)", "Build artifacts (%1 files)", del.buildArts.length)
@@ -1111,6 +1132,7 @@ PlasmoidItem {
                                 : i18n("Download build artifacts (source, build log, signature)")
                             onClicked: buildRow.gs === "busy" ? root.cancelGroup(del.modelData.url, "build")
                                                               : root.downloadGroup(del.modelData.url, "build")
+                        }
                         }
                     }
 
