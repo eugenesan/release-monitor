@@ -932,6 +932,23 @@ PlasmoidItem {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
 
+                    // release header (name, version, buttons, released, errors): tinted with the accent colour,
+                    // clearly different from the faint grey stripes of the file rows below
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: headerCol.implicitHeight + Kirigami.Units.smallSpacing * 2
+                        color: Qt.alpha(Kirigami.Theme.highlightColor, 0.14)
+                        radius: Kirigami.Units.smallSpacing / 2
+
+                        ColumnLayout {
+                            id: headerCol
+                            anchors.fill: parent
+                            anchors.leftMargin: Kirigami.Units.smallSpacing
+                            anchors.rightMargin: Kirigami.Units.smallSpacing
+                            anchors.topMargin: Kirigami.Units.smallSpacing
+                            anchors.bottomMargin: Kirigami.Units.smallSpacing
+                            spacing: Kirigami.Units.smallSpacing
+
                     // line 1: fixed-width name | version (centered in what is left) | fixed set of icons
                     RowLayout {
                         Layout.fillWidth: true
@@ -1012,6 +1029,9 @@ PlasmoidItem {
                         color: Kirigami.Theme.negativeTextColor
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
+                    }
+
+                        }
                     }
 
                     Repeater {
