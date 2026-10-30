@@ -28,6 +28,7 @@ PlasmoidItem {
     property var dlMeta: ({})       // "url|artifact" -> {part, pidf, total, cancelled} of running downloads
     property int activeDownloads: 0
     property bool polling: false
+    property bool showAllFiles: false   // false: only releases that are new show their files (default)
     property var rows: []           // derived: [{name, url, filter, type, st}]
     property int checkingCount: 0
     property int freshCount: 0        // unseen new releases (panel badge)
@@ -856,6 +857,13 @@ PlasmoidItem {
                     Layout.fillWidth: true
                 }
                 IconButton {
+                    icon.name: root.showAllFiles ? "arrow-up-double" : "arrow-down-double"
+                    text: root.showAllFiles ? i18n("Hide the files of releases that are not new")
+                                            : i18n("Show the files of all releases")
+                    enabled: root.items.length > 0
+                    onClicked: root.showAllFiles = !root.showAllFiles
+                }
+                IconButton {
                     icon.name: "dialog-ok-apply"
                     text: i18n("Mark all as seen")
                     visible: root.newCount > 0
@@ -924,6 +932,8 @@ PlasmoidItem {
                     readonly property var arts: st.artifacts || []
                     readonly property var plainArts: arts.filter(function (a) { return !a.group; })
                     readonly property var buildArts: arts.filter(function (a) { return a.group === "build"; })
+                    // new releases always show their files, so does any release with a download in progress
+                    readonly property bool filesVisible: isNew || root.showAllFiles || busyCount > 0
                     readonly property int busyCount: {
                         root.dlStatus;
                         return arts.filter(function (a) { return root.dlStatus[modelData.url + "|" + a.name] === "busy"; }).length;
@@ -1035,7 +1045,7 @@ PlasmoidItem {
                     }
 
                     Repeater {
-                        model: del.plainArts
+                        model: del.filesVisible ? del.plainArts : []
                         delegate: Rectangle {
                             id: artRow
                             required property int index
@@ -1106,7 +1116,7 @@ PlasmoidItem {
                     // F-Droid: source tarball, build log and signature as one download
                     Rectangle {
                         id: buildRow
-                        visible: del.buildArts.length > 0
+                        visible: del.filesVisible && del.buildArts.length > 0
                         readonly property string gs: root.groupStatus(del.modelData.url, del.buildArts)
                         Layout.fillWidth: true
                         implicitHeight: buildLine.implicitHeight + Kirigami.Units.smallSpacing
