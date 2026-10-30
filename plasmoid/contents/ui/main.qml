@@ -29,6 +29,13 @@ PlasmoidItem {
     property int activeDownloads: 0
     property bool polling: false
     property bool showAllFiles: false   // false: only releases that are new show their files (default)
+    property var fileOverrides: ({})    // url -> true/false: this release was opened/closed by hand
+
+    function setFilesOpen(url, open) {
+        var o = Object.assign({}, fileOverrides);
+        o[url] = open;
+        fileOverrides = o;
+    }
     property var rows: []           // derived: [{name, url, filter, type, st}]
     property int checkingCount: 0
     property int freshCount: 0        // unseen new releases (panel badge)
@@ -861,7 +868,10 @@ PlasmoidItem {
                     text: root.showAllFiles ? i18n("Hide the files of releases that are not new")
                                             : i18n("Show the files of all releases")
                     enabled: root.items.length > 0
-                    onClicked: root.showAllFiles = !root.showAllFiles
+                    onClicked: {
+                        root.showAllFiles = !root.showAllFiles;
+                        root.fileOverrides = {};          // the global switch resets the manual choices
+                    }
                 }
                 IconButton {
                     icon.name: "dialog-ok-apply"
@@ -932,8 +942,13 @@ PlasmoidItem {
                     readonly property var arts: st.artifacts || []
                     readonly property var plainArts: arts.filter(function (a) { return !a.group; })
                     readonly property var buildArts: arts.filter(function (a) { return a.group === "build"; })
-                    // new releases always show their files, so does any release with a download in progress
-                    readonly property bool filesVisible: isNew || root.showAllFiles || busyCount > 0
+                    // open by hand (arrow button) or closed by hand; otherwise new releases and the global switch decide.
+                    // A release with a download in progress always stays open.
+                    readonly property bool wantOpen: {
+                        var o = root.fileOverrides[modelData.url];
+                        return o !== undefined ? o : (isNew || root.showAllFiles);
+                    }
+                    readonly property bool filesVisible: wantOpen || busyCount > 0
                     readonly property int busyCount: {
                         root.dlStatus;
                         return arts.filter(function (a) { return root.dlStatus[modelData.url + "|" + a.name] === "busy"; }).length;
@@ -964,6 +979,13 @@ PlasmoidItem {
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
 
+                        // disclosure arrow: down = files hidden (click to show), up = files shown (click to hide)
+                        IconButton {
+                            icon.name: del.filesVisible ? "arrow-up" : "arrow-down"
+                            text: del.filesVisible ? i18n("Hide the files of this release") : i18n("Show the files of this release")
+                            enabled: del.arts.length > 0 && del.busyCount === 0
+                            onClicked: root.setFilesOpen(del.modelData.url, !del.filesVisible)
+                        }
                         PlasmaExtras.Heading {
                             level: 4
                             text: del.modelData.name
