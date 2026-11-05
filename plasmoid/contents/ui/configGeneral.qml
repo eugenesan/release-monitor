@@ -18,6 +18,8 @@ KCM.SimpleKCM {
     property string cfg_urlsJsonDefault
     property int cfg_intervalMinutes
     property int cfg_intervalMinutesDefault
+    property int cfg_retryMinutes
+    property int cfg_retryMinutesDefault
     property string cfg_downloadDir
     property string cfg_downloadDirDefault
     property bool cfg_subfolders
@@ -190,6 +192,17 @@ KCM.SimpleKCM {
                 editable: true
                 value: page.cfg_intervalMinutes
                 onValueModified: page.cfg_intervalMinutes = value
+            }
+
+            QQC2.SpinBox {
+                Kirigami.FormData.label: i18n("Retry after an error (minutes):")
+                from: 1
+                to: 1440
+                editable: true
+                value: page.cfg_retryMinutes
+                onValueModified: page.cfg_retryMinutes = value
+                QQC2.ToolTip.text: i18n("Wait before trying a URL again after a timeout or an HTTP 429 / 5xx error, so a server that is refusing requests is not hammered. A missing network connection is retried sooner: 20 s, 40 s, 80 s ...")
+                QQC2.ToolTip.visible: hovered
             }
 
             RowLayout {

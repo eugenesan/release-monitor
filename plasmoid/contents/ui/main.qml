@@ -43,6 +43,8 @@ PlasmoidItem {
     property int newCount: 0          // unseen new releases + just added URLs
     property int revision: 0          // bumped whenever `states` changes, delegates re-read their state
     property real now: Date.now()     // ticks while the tooltip is visible
+    property real lastBeat: 0         // last scheduler beat (to notice a resume from sleep)
+    property real holdUntil: 0        // after a resume: wait for the network until this time
     property real nextCheck: 0        // ms since epoch of the next scheduled check
     property bool hovered: false
     property int cmdSeq: 0
@@ -176,18 +178,29 @@ PlasmoidItem {
         return Math.max(1, cfg.intervalMinutes) * 60000;
     }
 
+    function retryMs() {
+        return Math.max(1, cfg.retryMinutes) * 60000;
+    }
+
     // When is this URL due? Each URL keeps its own last-check time (persisted with the release state), so a
     // restart of Plasma or the computer does not re-fetch URLs that were checked recently, and the countdown
     // continues from the time that has already passed. 0 = never checked = due now.
-    // Temporary failures (503, 429, no network) are retried with a growing delay: 3, 6, 12 ... minutes,
-    // never more than the normal interval, so a blocked API is not hammered.
+    // After a failed check:
+    // - "Network error" (no network yet: right after a resume or at login): retried quickly with a growing
+    //   delay, 20 s, 40 s, 80 s ..., never longer than the retry interval. No server was reached.
+    // - timeouts and HTTP 429 / 5xx: the configured retry interval. That fixed delay is what keeps a server
+    //   that is refusing us from blocking us for good.
+    // - any other error (404, bad regex ...): wait for the normal interval.
     function dueAt(it) {
         var st = states[it.url];
         if (!st || !st.lastCheck) return 0;
         var last = Math.min(st.lastCheck, Date.now());          // clock set back: do not wait for the future
         var iv = intervalMs();
-        if (isTransient(st.error))
-            return last + Math.min(iv, 3 * 60000 * Math.pow(2, Math.max(0, (st.fails || 1) - 1)));
+        var kind = errorKind(st.error);
+        if (kind === "network")
+            return last + Math.min(iv, retryMs(), 20000 * Math.pow(2, Math.max(0, (st.fails || 1) - 1)));
+        if (kind === "server")
+            return last + Math.min(iv, retryMs());
         return last + iv;
     }
 
@@ -195,21 +208,42 @@ PlasmoidItem {
         var min = Infinity;
         items.forEach(function (it) { var d = dueAt(it); if (d < min) min = d; });
         nextCheck = !isFinite(min) ? 0 : (min === 0 ? Date.now() : min);
+        var d = nextCheck - Date.now();
+        if (nextCheck > 0 && d > 0 && d <= 120000) { shortTimer.interval = d; shortTimer.restart(); }   // short delays: exact timer
+        else shortTimer.stop();
     }
 
     // Check only the URLs that are due (all of them after a long sleep, none right after a restart)
     function checkDue() {
         var t = Date.now();
-        items.forEach(function (it) { if (dueAt(it) <= t) checkOne(it); });
+        items.forEach(function (it) { if (dueAt(it) <= t + 500) checkOne(it); });
     }
 
-    function tick() {
-        if (nextCheck > 0 && Date.now() >= nextCheck) checkDue();
+    // If the time since the previous beat is far longer than a beat, the computer was asleep: the network is
+    // probably not up yet, so due checks wait a little (and a failed one is retried quickly, see dueAt).
+    function heartbeat() {
+        var t = Date.now();
+        if (lastBeat > 0 && t - lastBeat > 180000) {
+            holdUntil = t + 20000;
+            console.info("release-monitor: resumed after " + Math.round((t - lastBeat) / 60000) + " min, waiting for the network");
+        }
+        lastBeat = t;
+        if (t < holdUntil) return;
+        if (nextCheck > 0 && t + 500 >= nextCheck) checkDue();
     }
 
-    // Errors that are likely to go away on their own (no network right after a resume, server hiccup)
+    // What kind of failure is this? "network" = no response at all, "server" = the server refuses or is
+    // overloaded (timeout, HTTP 429 / 5xx), "" = permanent (404, bad regex ...). The texts are not translated
+    // on purpose, they are matched here.
+    function errorKind(err) {
+        if (!err) return "";
+        if (/^Network error/.test(err)) return "network";
+        if (/^(Timed out|HTTP (5\d\d|429))/.test(err)) return "server";
+        return "";
+    }
+
     function isTransient(err) {
-        return !!err && /^(Network error|Timed out|HTTP (5\d\d|429))/.test(err);
+        return errorKind(err) !== "";
     }
 
     function tooltipCells(list) {
@@ -414,6 +448,7 @@ PlasmoidItem {
 
     function applyResult(item, err, res) {
         var st = states[item.url] || {};
+        var wasFresh = st.fresh === true;
         st.lastCheck = Date.now();
         try {
             if (err || !res) {
@@ -450,6 +485,11 @@ PlasmoidItem {
         states[item.url] = st;
         persist();
         rebuildRows();
+        if (st.error)
+            console.warn("release-monitor: " + item.name + ": " + st.error + ", next try in "
+                         + Math.max(0, Math.round((dueAt(item) - Date.now()) / 1000)) + " s");
+        else if (st.fresh && !wasFresh)
+            console.info("release-monitor: " + item.name + ": new release " + st.version);
     }
 
     // A check that never answers must not leave the item stuck on "never checked"
@@ -466,7 +506,7 @@ PlasmoidItem {
                 root.checkingCount--;
                 delete root.startedAt[url];
                 var item = root.findItem(url);
-                if (item) root.applyResult(item, i18n("Timed out"), null);
+                if (item) root.applyResult(item, "Timed out", null);
             });
         }
     }
@@ -768,7 +808,13 @@ PlasmoidItem {
         interval: 60000
         repeat: true
         running: true
-        onTriggered: root.tick()
+        onTriggered: root.heartbeat()
+    }
+
+    Timer {
+        id: shortTimer
+        repeat: false
+        onTriggered: root.heartbeat()
     }
 
     // keeps "in N min" in the tooltip current, only while it can be seen
@@ -799,7 +845,10 @@ PlasmoidItem {
 
     Component.onCompleted: {
         try { states = JSON.parse(cfg.stateJson || "{}"); } catch (e) { states = {}; }
+        lastBeat = Date.now();
         loadItems();
+        console.info("release-monitor: started with " + items.length + " URLs, next check in "
+                     + Math.max(0, Math.round((nextCheck - Date.now()) / 60000)) + " min");
     }
 
     // ------------------------------------------------------------ small reusable button

@@ -12,6 +12,10 @@
             <default>720</default>
             <min>1</min>
         </entry>
+        <entry name="retryMinutes" type="Int">
+            <default>30</default>
+            <min>1</min>
+        </entry>
         <entry name="downloadDir" type="String">
             <default>~/Downloads</default>
         </entry>
